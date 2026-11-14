@@ -5,15 +5,22 @@
 A full stack for building software with coding agents. You say what the
 product must do; agents build it, from verified rules to a tested, running
 React application, and every layer they touch is checked before you sign
-off.
+off. Then it ships to Cloudflare Workers through a release train that gates
+every deploy on the running app and rolls back what fails.
 
-[![Use this template](https://img.shields.io/badge/Use_this_template-2ea44f?style=for-the-badge&logo=github)](https://github.com/lalalune/vibestack/generate)
+This is a fork of [lalalune/vibestack](https://github.com/lalalune/vibestack)
+on the branch `cloudflare-train`; `main` stays equal to upstream. To take
+upstream's changes: `git fetch upstream && git merge upstream/main`, then
+`pnpm verify` ([Deploy](#deploy-on-cloudflare-with-the-release-train)).
+
+[![Use this template](https://img.shields.io/badge/Use_this_template-2ea44f?style=for-the-badge&logo=github)](https://github.com/lekt9/vibestack/generate)
 
 [Quickstart](#quickstart) ·
 [The stack](#the-stack) ·
 [Getting started](#getting-started) ·
 [Studio](#studio) ·
 [Build your project](#build-your-project) ·
+[Deploy](#deploy-on-cloudflare-with-the-release-train) ·
 [Commands](#commands) ·
 [Examples](#examples)
 
@@ -26,7 +33,7 @@ off.
 **Starting a new project? Paste this into your agent:**
 
 ```text
-Help me build a new project from https://github.com/lalalune/vibestack.
+Help me build a new project from https://github.com/lekt9/vibestack.
 
 Start by asking what I want to build, who it is for, and its main workflows.
 Then:
@@ -44,8 +51,8 @@ Then:
    my request before running pnpm accept.
 ```
 
-[![Start in ChatGPT](https://img.shields.io/badge/Start_in_ChatGPT-212121?style=for-the-badge)](https://chatgpt.com/?q=Help%20me%20build%20a%20new%20project%20from%20https%3A%2F%2Fgithub.com%2Flalalune%2Fvibestack.%0A%0AStart%20by%20asking%20what%20I%20want%20to%20build%2C%20who%20it%20is%20for%2C%20and%20its%20main%20workflows.%0AThen%3A%0A1.%20Use%20the%20template%20in%20a%20new%20project%20directory%2C%20or%20use%20my%20existing%20copy.%0A%20%20%20Read%20AGENTS.md%20and%20README.md%20in%20full%20and%20follow%20their%20skills.%0A2.%20Check%20for%20Node.js%2026%2B%20and%20Dafny%204.11%20on%20PATH%2C%20run%20pnpm%20install%2C%20and%20follow%0A%20%20%20the%20README's%20%22Set%20up%20a%20new%20project%22%20section.%0A3.%20Write%20my%20stories%20in%20spec%2Fapp%2Findex.md%2C%20with%20rules%20and%20Quint%20under%20each.%0A4.%20Build%20the%20app%20in%20apps%2Fapp%3A%20its%20shell%20in%20VibeLang%20on%20the%20generated%20code%20in%0A%20%20%20gen%2F%2C%20its%20interface%20in%20React.%20Add%20journey%20tests%20through%20the%20real%20UI%2C%0A%20%20%20API%2C%20storage%2C%20or%20other%20services.%0A5.%20Run%20pnpm%20check%20and%20fix%20failures%20until%20only%20my%20review%20remains.%0A%20%20%20Never%20edit%20generated%20files%20or%20weaken%20rules%20to%20pass%20checks.%0A6.%20Show%20me%20how%20to%20run%20the%20app%2C%20summarize%20what%20needs%20review%2C%20and%20wait%20for%0A%20%20%20my%20request%20before%20running%20pnpm%20accept.)
-[![Start in Claude](https://img.shields.io/badge/Start_in_Claude-B54A32?style=for-the-badge)](https://claude.ai/new?q=Help%20me%20build%20a%20new%20project%20from%20https%3A%2F%2Fgithub.com%2Flalalune%2Fvibestack.%0A%0AStart%20by%20asking%20what%20I%20want%20to%20build%2C%20who%20it%20is%20for%2C%20and%20its%20main%20workflows.%0AThen%3A%0A1.%20Use%20the%20template%20in%20a%20new%20project%20directory%2C%20or%20use%20my%20existing%20copy.%0A%20%20%20Read%20AGENTS.md%20and%20README.md%20in%20full%20and%20follow%20their%20skills.%0A2.%20Check%20for%20Node.js%2026%2B%20and%20Dafny%204.11%20on%20PATH%2C%20run%20pnpm%20install%2C%20and%20follow%0A%20%20%20the%20README's%20%22Set%20up%20a%20new%20project%22%20section.%0A3.%20Write%20my%20stories%20in%20spec%2Fapp%2Findex.md%2C%20with%20rules%20and%20Quint%20under%20each.%0A4.%20Build%20the%20app%20in%20apps%2Fapp%3A%20its%20shell%20in%20VibeLang%20on%20the%20generated%20code%20in%0A%20%20%20gen%2F%2C%20its%20interface%20in%20React.%20Add%20journey%20tests%20through%20the%20real%20UI%2C%0A%20%20%20API%2C%20storage%2C%20or%20other%20services.%0A5.%20Run%20pnpm%20check%20and%20fix%20failures%20until%20only%20my%20review%20remains.%0A%20%20%20Never%20edit%20generated%20files%20or%20weaken%20rules%20to%20pass%20checks.%0A6.%20Show%20me%20how%20to%20run%20the%20app%2C%20summarize%20what%20needs%20review%2C%20and%20wait%20for%0A%20%20%20my%20request%20before%20running%20pnpm%20accept.)
+[![Start in ChatGPT](https://img.shields.io/badge/Start_in_ChatGPT-212121?style=for-the-badge)](https://chatgpt.com/?q=Help%20me%20build%20a%20new%20project%20from%20https%3A%2F%2Fgithub.com%2Flekt9%2Fvibestack.%0A%0AStart%20by%20asking%20what%20I%20want%20to%20build%2C%20who%20it%20is%20for%2C%20and%20its%20main%20workflows.%0AThen%3A%0A1.%20Use%20the%20template%20in%20a%20new%20project%20directory%2C%20or%20use%20my%20existing%20copy.%0A%20%20%20Read%20AGENTS.md%20and%20README.md%20in%20full%20and%20follow%20their%20skills.%0A2.%20Check%20for%20Node.js%2026%2B%20and%20Dafny%204.11%20on%20PATH%2C%20run%20pnpm%20install%2C%20and%20follow%0A%20%20%20the%20README's%20%22Set%20up%20a%20new%20project%22%20section.%0A3.%20Write%20my%20stories%20in%20spec%2Fapp%2Findex.md%2C%20with%20rules%20and%20Quint%20under%20each.%0A4.%20Build%20the%20app%20in%20apps%2Fapp%3A%20its%20shell%20in%20VibeLang%20on%20the%20generated%20code%20in%0A%20%20%20gen%2F%2C%20its%20interface%20in%20React.%20Add%20journey%20tests%20through%20the%20real%20UI%2C%0A%20%20%20API%2C%20storage%2C%20or%20other%20services.%0A5.%20Run%20pnpm%20check%20and%20fix%20failures%20until%20only%20my%20review%20remains.%0A%20%20%20Never%20edit%20generated%20files%20or%20weaken%20rules%20to%20pass%20checks.%0A6.%20Show%20me%20how%20to%20run%20the%20app%2C%20summarize%20what%20needs%20review%2C%20and%20wait%20for%0A%20%20%20my%20request%20before%20running%20pnpm%20accept.)
+[![Start in Claude](https://img.shields.io/badge/Start_in_Claude-B54A32?style=for-the-badge)](https://claude.ai/new?q=Help%20me%20build%20a%20new%20project%20from%20https%3A%2F%2Fgithub.com%2Flekt9%2Fvibestack.%0A%0AStart%20by%20asking%20what%20I%20want%20to%20build%2C%20who%20it%20is%20for%2C%20and%20its%20main%20workflows.%0AThen%3A%0A1.%20Use%20the%20template%20in%20a%20new%20project%20directory%2C%20or%20use%20my%20existing%20copy.%0A%20%20%20Read%20AGENTS.md%20and%20README.md%20in%20full%20and%20follow%20their%20skills.%0A2.%20Check%20for%20Node.js%2026%2B%20and%20Dafny%204.11%20on%20PATH%2C%20run%20pnpm%20install%2C%20and%20follow%0A%20%20%20the%20README's%20%22Set%20up%20a%20new%20project%22%20section.%0A3.%20Write%20my%20stories%20in%20spec%2Fapp%2Findex.md%2C%20with%20rules%20and%20Quint%20under%20each.%0A4.%20Build%20the%20app%20in%20apps%2Fapp%3A%20its%20shell%20in%20VibeLang%20on%20the%20generated%20code%20in%0A%20%20%20gen%2F%2C%20its%20interface%20in%20React.%20Add%20journey%20tests%20through%20the%20real%20UI%2C%0A%20%20%20API%2C%20storage%2C%20or%20other%20services.%0A5.%20Run%20pnpm%20check%20and%20fix%20failures%20until%20only%20my%20review%20remains.%0A%20%20%20Never%20edit%20generated%20files%20or%20weaken%20rules%20to%20pass%20checks.%0A6.%20Show%20me%20how%20to%20run%20the%20app%2C%20summarize%20what%20needs%20review%2C%20and%20wait%20for%0A%20%20%20my%20request%20before%20running%20pnpm%20accept.)
 
 ## Why
 
@@ -110,7 +117,7 @@ means are in [CONTRIBUTING.md](CONTRIBUTING.md#architecture).
 **Needs** Node 26, [pnpm](https://pnpm.io) and
 [Dafny](https://github.com/dafny-lang/dafny/releases) 4.11 on the `PATH`.
 
-1. Click **[Use this template](https://github.com/lalalune/vibestack/generate)**
+1. Click **[Use this template](https://github.com/lekt9/vibestack/generate)**
    to create your own repository, then clone it and enter its directory.
 2. Install the toolchain and start Studio with every app's development
    server:
@@ -129,6 +136,8 @@ means are in [CONTRIBUTING.md](CONTRIBUTING.md#architecture).
    code on them in place of the hello world, runs the checks, and reports
    what needs your review.
 5. Read what it reports, run the app, and sign off with `pnpm accept`.
+6. Deploy it: [Deploy on Cloudflare with the release
+   train](#deploy-on-cloudflare-with-the-release-train).
 
 Agents start with [AGENTS.md](AGENTS.md). All four skills (`sync`, `shell`,
 `prove`, `design`) live in [`.claude/skills/`](.claude/skills/), with relative
@@ -236,6 +245,97 @@ pnpm accept
 `accept` checks afresh and records what `review` lists in `spec/lock.json`,
 [all or nothing](SPEC.md#review). Commit the ledger with the spec.
 
+## Deploy on Cloudflare with the release train
+
+The app runs as a Cloudflare Worker: its page as static assets, each
+machine (a greeter, an order) in a Durable Object of its own over the same
+`KeyValueStore` the shell uses, so `gen/` and the spec stay the one model
+([shell skill, "On Cloudflare Workers"](.claude/skills/shell/SKILL.md#on-cloudflare-workers)).
+It reaches Cloudflare only through the
+[cf-release-train](https://github.com/lekt9/skills/tree/main/cf-release-train)
+in `.deploy/`, never `wrangler deploy` by hand. What the train adds to
+`pnpm check`: the checks run again before any deploy, and gates run on the
+deployed Worker after it, rolling back on a failure.
+
+| Environment | Comes from | Gated by, on the deployed Worker |
+|---|---|---|
+| preview | every other branch: its own Worker, `<name>-pr-<branch>`, deleted with the branch | conformance (the spec's machine walked on the Worker), the journeys with `DEPLOY_URL`, a simulated person per story. A failure rolls it back, or deletes a first deploy |
+| staging | a push to `staging` | the same, then a 6-hour soak with simulated people every 25 minutes |
+| preprod | `release/X.Y`, cut from a soaked staging | the same; first `spec check` with review signed off (`pnpm accept`) |
+| production | a tag `vX.Y.Z`, or the soak promotion | review signed off first; then `spec observe`, and a watch every 30 minutes that rolls back |
+
+**Simulated people come from the stories.** `spec train` (run by `pnpm new`)
+writes one scenario per `Story:` of each spec a surface of
+`.deploy/manifest.json` serves, in `.deploy/sims/`: the person the story
+names, wanting what it says, on the deployed page in a real browser at
+`/?key=sim-<run>`, a machine of their own. Its oracle is
+`spec observe <module> <url> --key sim-<run> --run <run>`: false before the
+person acts, true once that machine holds a new state the generated module
+accepts. `deploy.mjs coverage` fails on a story with no scenario.
+
+**Set up, once.**
+
+1. In `.deploy/manifest.json`, set `"subdomain"` to your account's
+   workers.dev subdomain (it is `lewis-6d8` here); the gates' addresses and
+   `spec observe` use it.
+2. Sign in: `npx wrangler login`, or export `CLOUDFLARE_API_TOKEN` (Workers
+   Scripts: Edit) and `CLOUDFLARE_ACCOUNT_ID`.
+3. The simulated people run on [Claude Code](https://docs.claude.com/en/docs/claude-code)
+   (`claude` on the `PATH`, signed in; in CI the subscription token from
+   `claude setup-token` as `CLAUDE_CODE_OAUTH_TOKEN`, never an API key) with
+   Playwright's Chromium (`pnpm exec playwright install chromium`).
+4. On GitHub, create the environments `preview`, `staging`, `preprod` and
+   `production`, and give them the secrets `CLOUDFLARE_API_TOKEN`,
+   `CLOUDFLARE_ACCOUNT_ID` and `CLAUDE_CODE_OAUTH_TOKEN`. Optional:
+   `WORKER_SECRETS` (one JSON object, set on each new preview Worker),
+   `GATE_ENV` (lines of `NAME=value` the gates need), `RELEASE_TOKEN` with the
+   variable `AUTO_PROMOTE=true` (the soak promotion tags and ships
+   production by itself; otherwise it opens a pull request), and the variable
+   `AUTO_FIX=true` with `AUTOFIX_TOKEN` (an agent proposes a fix for a red
+   pull request). The workflows are `.github/workflows/deploy.yml` (every
+   push), `preview-cleanup.yml`, `promote.yml` and `watch.yml`.
+
+**Commands.** Each prints one marker line; `--dry-run` deploys nothing.
+
+| Command | Does |
+|---|---|
+| `node .deploy/deploy.mjs coverage` | Every surface has unit, end-to-end and user tests, every story a simulated person (`COVERAGE_OK`) |
+| `node .deploy/deploy.mjs checks` | Everything before a deploy: coverage, `spec check` with no rule unproved, `pnpm verify`, `spec train --check`, the scenarios (`CHECKS_OK`) |
+| `node .deploy/deploy.mjs preview --branch <b>` | Deploys the branch's preview and gates it; `--delete` removes it (`DEPLOY_OK`, or `DEPLOY_FAIL … rolled_back=n deleted=n`) |
+| `node .deploy/deploy.mjs staging` | Deploys staging, gates it and starts its soak |
+| `node .deploy/deploy.mjs gate <env>`, `soak <env>`, `drill staging` | The gates again on what is deployed; the soak's verdict; the rollback drill (back a version, gated, forward again) |
+| `node .deploy/deploy.mjs production` | Only from CI, from a tag: `--no-gate` is refused for preprod and production |
+
+A deploy builds the Worker itself (`build.command` in each `wrangler*.jsonc`
+names the package, since wrangler runs it in the repository root), so what is
+gated is what is in the checkout.
+
+**A second application.** `pnpm new <name>` writes `spec/<name>/index.md`,
+then fails until the train serves it. Give it a Worker the way `apps/app`
+has one:
+
+1. `apps/<name>` with `src/worker.vibe` (`machineObject`, `machineApi("<module>", …)`
+   and `worker({ <module>: "<BINDING>" })`), and three configs,
+   `wrangler.jsonc`, `wrangler.staging.jsonc` and `wrangler.preprod.jsonc`,
+   copied from `apps/app`'s with the names and binding changed and
+   `"build": { "command": "pnpm -s --filter <package> build" }`.
+2. A driver, `apps/<name>/test/drivers/<module>.ts`, on `worker()` from
+   `vibestack/testing/workers`, like `apps/app/test/drivers/app.ts`: keys
+   that start with `conformance-`, forgotten at the end.
+3. In `.deploy/manifest.json`, a `workers[]` entry with the three configs
+   (and `"preview": { "from": "staging" }`), and a `surfaces[]` entry with
+   `"spec": "spec/<name>/index.md"` and `"worker": "<name>"`, its `unit` and
+   `e2e` naming the checks and gates above; add the gates for its Worker
+   (`node .deploy/vibestack.mjs check --worker <name>`, its journeys with
+   `DEPLOY_URL="$DEPLOY_URL_<NAME>"`).
+4. `node vibestack/spec.ts train`, then `node .deploy/deploy.mjs coverage`
+   until it says `COVERAGE_OK`.
+
+**Known red upstream.** `pnpm examples` fails on this fork as it does on
+upstream: the dashboard example's `tracker.ts` (2 of 344 obligations not
+proved, 32 review items) and the fullstack example's one review item. The
+fork changes nothing under `vibestack/examples/`.
+
 ## Set up a new project
 
 Before committing your application's starting point:
@@ -290,9 +390,9 @@ current one. Installed as a package, use `pnpm exec spec <command> [<dir>]`.
 | `pnpm accept unproved` | Records the listed obligations as simulated only. The user's decision |
 | `pnpm new [<path>]` | Fills an empty root index or creates a child [starter spec](SPEC.md#writing-a-spec), and with `.deploy/manifest.json` writes a simulated person for its story |
 | `node vibestack/spec.ts train [--check]` | Writes a release-train scenario in `.deploy/sims/` for every story of each surface's spec; `--check` only says whether they are up to date (`TRAIN_OK`) |
-| `node vibestack/spec.ts observe <module> <url> [--run <id>]` | Reads a deployed Worker: its page answers and its machine holds a state the spec allows (`OBSERVED`); with `--run`, false on the first read and true once the state has changed (`OBSERVED_CHANGE`) |
+| `node vibestack/spec.ts observe <module> <url> [--key <key>] [--run <id>]` | Reads a deployed Worker: its page answers and its machine `key` (the module's name by default) holds a state the spec allows (`OBSERVED`); with `--run`, false on the first read and true once the state has changed (`OBSERVED_CHANGE`) |
 | `pnpm -C apps/app dev` | The app's Worker and page under `wrangler dev` |
-| `node .deploy/deploy.mjs coverage`, `checks`, `staging` | The release train: every surface tested three ways, the checks before a deploy, a gated deploy with rollback ([cf-release-train](.deploy/manifest.json)) |
+| `node .deploy/deploy.mjs coverage`, `checks`, `preview --branch <b>`, `staging` | The release train: every surface tested three ways, the checks before a deploy, a gated deploy with rollback ([Deploy](#deploy-on-cloudflare-with-the-release-train)) |
 | `node vibestack/spec.ts init [<dir>]` | Sets up an existing project ([above](#using-it-from-another-package)) |
 | `node vibestack/spec.ts migrate [<dir>]` | Consolidates old review ledgers into `spec/lock.json`, keeping their approvals |
 | `pnpm demo` | Runs the order example's scripted checkout session |

@@ -34,10 +34,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lalalune/vibestack.git"
+    "url": "git+https://github.com/lekt9/vibestack.git"
   },
-  "homepage": "https://github.com/lalalune/vibestack#readme",
-  "bugs": "https://github.com/lalalune/vibestack/issues",
+  "homepage": "https://github.com/lekt9/vibestack#readme",
+  "bugs": "https://github.com/lekt9/vibestack/issues",
   "keywords": [
     "formal-verification",
     "quint",
