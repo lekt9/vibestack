@@ -1,0 +1,165 @@
+{
+  "branches": {
+    "staging": "staging",
+    "release": "release/",
+    "main": "main"
+  },
+  "workers": [
+    {
+      "name": "app",
+      "envs": {
+        "staging": {
+          "config": "apps/app/wrangler.staging.jsonc"
+        },
+        "preprod": {
+          "config": "apps/app/wrangler.preprod.jsonc"
+        },
+        "production": {
+          "config": "apps/app/wrangler.jsonc"
+        },
+        "preview": {
+          "from": "staging"
+        }
+      },
+      "soak": {
+        "minRequests": 50
+      }
+    }
+  ],
+  "checks": [
+    {
+      "layer": "unit",
+      "name": "pnpm check: the spec's model, rules, proofs, generated code, types, tests and conformance on the local Worker",
+      "cmd": "pnpm check",
+      "marker": "next: all green",
+      "timeout_s": 3600
+    },
+    {
+      "layer": "static",
+      "name": "pnpm verify: build, types, tests, browser tests, lint, Knip, Madge and the selftest of every package",
+      "cmd": "pnpm verify",
+      "timeout_s": 3600
+    },
+    {
+      "layer": "unit",
+      "name": "every story is a simulated person",
+      "cmd": "node vibestack/spec.ts train --check",
+      "marker": "TRAIN_OK"
+    },
+    {
+      "layer": "unit",
+      "name": "the scenarios are sound",
+      "cmd": "node .deploy/sim.mjs validate",
+      "marker": "SIM_VALIDATE_OK"
+    }
+  ],
+  "gates": {
+    "preview": [
+      {
+        "name": "conformance on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
+        "marker": "next: all green",
+        "timeout_s": 3600
+      },
+      {
+        "name": "journeys on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm -C apps/app exec vitest run test/app.test.vibe"
+      },
+      {
+        "name": "simulated people",
+        "cmd": "node .deploy/sim.mjs run --env preview",
+        "marker": "SIM_OK"
+      }
+    ],
+    "staging": [
+      {
+        "name": "conformance on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
+        "marker": "next: all green",
+        "timeout_s": 3600
+      },
+      {
+        "name": "journeys on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm -C apps/app exec vitest run test/app.test.vibe"
+      }
+    ],
+    "preprod": [
+      {
+        "name": "conformance on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
+        "marker": "next: all green",
+        "timeout_s": 3600
+      },
+      {
+        "name": "journeys on the deployed Worker",
+        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm -C apps/app exec vitest run test/app.test.vibe"
+      }
+    ],
+    "production": [
+      {
+        "name": "the page answers and the greeter holds a state the spec allows",
+        "cmd": "node vibestack/spec.ts observe app \"$DEPLOY_URL_APP\"",
+        "marker": "OBSERVED app"
+      }
+    ]
+  },
+  "watch": {
+    "production": [
+      {
+        "name": "the page answers and the greeter holds a state the spec allows",
+        "cmd": "node vibestack/spec.ts observe app \"$DEPLOY_URL_APP\"",
+        "marker": "OBSERVED app"
+      }
+    ]
+  },
+  "soak": {
+    "hours": 6,
+    "minRequests": 50,
+    "maxErrorRate": 0.01
+  },
+  "surfaces": [
+    {
+      "name": "app",
+      "kind": [
+        "http",
+        "pages",
+        "durable-object"
+      ],
+      "what": "the greeter: its page, its HTTP API at /api/app/<key>, and a Durable Object per greeter",
+      "spec": "spec/app/index.md",
+      "worker": "app",
+      "unit": [
+        "pnpm check: the spec's model, rules, proofs, generated code, types, tests and conformance on the local Worker",
+        "pnpm verify: build, types, tests, browser tests, lint, Knip, Madge and the selftest of every package"
+      ],
+      "e2e": [
+        "conformance on the deployed Worker",
+        "journeys on the deployed Worker"
+      ],
+      "user": [
+        "app-say-hello"
+      ]
+    }
+  ],
+  "sims": {
+    "dir": ".deploy/sims",
+    "envs": [
+      "preview",
+      "staging",
+      "preprod"
+    ],
+    "agent": {
+      "servers": {
+        "browser": {
+          "command": "npx",
+          "args": [
+            "--yes",
+            "@playwright/mcp@latest",
+            "--headless",
+            "--isolated"
+          ]
+        }
+      }
+    }
+  }
+}

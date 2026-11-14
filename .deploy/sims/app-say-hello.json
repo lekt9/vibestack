@@ -1,0 +1,17 @@
+{
+  "name": "app-say-hello",
+  "surface": "app",
+  "story": "spec/app/index.md, \"Story: Say hello\"",
+  "persona": {
+    "id": "visitor",
+    "about": "a visitor, in the words of spec/app/index.md"
+  },
+  "task": "I am on the site at {DEPLOY_URL_APP}. I want to type my name and be greeted, so that I know the page heard me.",
+  "oracles": [
+    {
+      "name": "the deployed app changed, into a state spec/app/index.md allows",
+      "cmd": "node vibestack/spec.ts observe app \"$DEPLOY_URL_APP\" --run {run}",
+      "marker": "OBSERVED_CHANGE"
+    }
+  ]
+}
