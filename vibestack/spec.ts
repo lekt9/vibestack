@@ -663,7 +663,7 @@ const isMain = (): boolean => {
   }
 };
 
-const USAGE = "usage: spec check [<directory>] [--json] [--nightly] | watch [<directory>] | gen [<directory>] [--if-valid] | accept [<directory>] [unproved] | new [<path>] | init [<directory>] | migrate [<directory>] | studio [<directory>] [--port <n>] | tests [<directory>] | stories gen [--watch] [--check] | tokens build|check|apply | tasks [<task>…]";
+const USAGE = "usage: spec check [<directory>] [--json] [--nightly] | watch [<directory>] | gen [<directory>] [--if-valid] | accept [<directory>] [unproved] | new [<path>] | train [<directory>] [--check] | observe <module> <url> [--run <id>] | init [<directory>] | migrate [<directory>] | studio [<directory>] [--port <n>] | tests [<directory>] | stories gen [--watch] [--check] | tokens build|check|apply | tasks [<task>…]";
 
 /**
  * Check, then check again whenever spec/, package.json, tsconfig.json, or src/ or test/ of the root or of an owner changes. One process stays warm between runs
@@ -736,7 +736,7 @@ if (isMain()) {
   const takes = (...allowed: string[][]) => allowed.some((a) => a.length === args.length && a.every((x, i) => x === "*" || x === args[i]));
   try {
     if (Number(process.versions.node.split(".")[0]) < 26) throw new Error(`spec needs Node 26 or later; this is Node ${process.versions.node}`);
-    const options: Record<string, string[]> = { check: ["--json", "--nightly"], gen: ["--if-valid"], accept: ["unproved"], watch: [], init: [], migrate: [] };
+    const options: Record<string, string[]> = { check: ["--json", "--nightly"], gen: ["--if-valid"], accept: ["unproved"], watch: [], init: [], migrate: [], train: ["--check"] };
     if (Object.hasOwn(options, command)) {
       const directories = args.filter((arg) => !options[command].includes(arg));
       if (directories.length === 1 && !directories[0].startsWith("-")) {
@@ -811,6 +811,20 @@ if (isMain()) {
       } finally { release(); }
     } else if (command === "new" && takes([], ["*"])) {
       console.log(`wrote ${newSpec(root, args[0])}; run \`pnpm check\``);
+      // A new story is a new simulated person on the release train, where the project rides it.
+      if (fs.existsSync(path.join(root, ".deploy", "manifest.json"))) {
+        const { ok, lines } = (await import("./train.ts")).train(root);
+        console.log(lines.join("\n"));
+        if (!ok) process.exitCode = 1;
+      }
+    } else if (command === "train" && takes([], ["--check"])) {
+      const { ok, lines } = (await import("./train.ts")).train(root, args[0] === "--check");
+      console.log(lines.join("\n"));
+      process.exitCode = ok ? 0 : 1;
+    } else if (command === "observe" && takes(["*", "*"], ["*", "*", "--run", "*"])) {
+      const { ok, line } = await (await import("./train.ts")).observe(root, args[0], args[1], args[3]);
+      console.log(line);
+      process.exitCode = ok ? 0 : 1;
     } else {
       console.error(USAGE);
       process.exitCode = 2;

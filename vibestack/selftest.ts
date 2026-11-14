@@ -1945,6 +1945,34 @@ pure def lawOwn(own: int): bool = shadowOwn(own) == own`));
     }
   });
 
+  test("on the release train every story of a spec a surface serves is a simulated person: a new story without one, a scenario whose story is gone and a spec with stories no surface names are caught; `new` and `train` catch up, keeping hand-written scenarios", async () => {
+    const script = path.join(project, "vibestack/spec.ts");
+    const cli = (root: string, ...args: string[]) => runCli(script, root, ...args);
+    const surface = { name: "web", spec: "spec/index.md", worker: "web-app", user: ["by-hand"] };
+    const root = scratch({ "spec/index.md": "", ".deploy/manifest.json": JSON.stringify({ surfaces: [surface] }), ".deploy/sims/by-hand.json": JSON.stringify({ name: "by-hand", surface: "web" }) });
+    const read = (file: string) => JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
+    const made = await cli(root, "new");
+    assert.equal(made.status, 0, made.stdout + made.stderr);
+    assert.match(made.stdout, /wrote: \.deploy\/sims\/index-keep-a-tally\.json[\s\S]*TRAIN_OK stories=1 sims=1/);
+    assert.deepEqual(read(".deploy/manifest.json").surfaces[0].user, ["by-hand", "index-keep-a-tally"]);
+    const sim = read(".deploy/sims/index-keep-a-tally.json");
+    assert.deepEqual([sim.surface, sim.persona.id, sim.oracles[0].cmd], ["web", "user", 'node vibestack/spec.ts observe index "$DEPLOY_URL_WEB_APP" --run {run}']);
+    assert.match(sim.task, /^I am on the site at \{DEPLOY_URL_WEB_APP\}\. I want to add to a tally, never past its limit, so that I can count things up to a known number\.$/);
+    assert.match((await cli(root, "train", "--check")).stdout, /^TRAIN_OK stories=1 sims=1$/m);
+    const spec = path.join(root, "spec/index.md"), text = fs.readFileSync(spec, "utf8");
+    fs.writeFileSync(spec, text.replace("## Story: Keep a tally", "## Story: Count up"));
+    const renamed = await cli(root, "train", "--check");
+    assert.equal(renamed.status, 1);
+    assert.match(renamed.stdout, /out of date: \.deploy\/sims\/index-count-up\.json[\s\S]*story is gone: \.deploy\/sims\/index-keep-a-tally\.json/);
+    assert.equal((await cli(root, "train")).status, 0);
+    assert.deepEqual([fs.existsSync(path.join(root, ".deploy/sims/index-keep-a-tally.json")), fs.existsSync(path.join(root, ".deploy/sims/by-hand.json"))], [false, true]);
+    assert.deepEqual(read(".deploy/manifest.json").surfaces[0].user, ["by-hand", "index-count-up"]);
+    const child = await cli(root, "new", "shop");
+    assert.equal(child.status, 1);
+    assert.match(child.stdout, /spec\/shop\/index\.md has 1 stories and no surface of \.deploy\/manifest\.json names it in "spec"/);
+    assert.equal((await cli(root, "train", "--check")).status, 1);
+  });
+
   test("a fence of any length or kind holds prose, and closes only with its own kind and length", () => {
     const four = "`".repeat(4);
     const root = scratch({ "spec/f.md": `# F\n\n## Story\n\n### Real\n\n${F}quint\npure val a = 1\n${F}\n\n${four}markdown\n### Not a rule\n${F}quint\npure val b = 2\n${F}\n${four}\n\n~~~\n### Nor this\n${F}\n~~~\n\n### Also real\n\n${F}quint\npure val c = 3\n${F}\n` });
