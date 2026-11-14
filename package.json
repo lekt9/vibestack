@@ -90,7 +90,8 @@
     "vibelang": "0.0.13",
     "vibelang-vite": "0.0.13",
     "vite": "8.3.5",
-    "vitest": "5.1.0"
+    "vitest": "5.1.0",
+    "wrangler": "catalog:"
   },
   "peerDependencies": {
     "@vitest/browser-playwright": "5.1.0",
@@ -108,8 +109,10 @@
     "./testing": "./vibestack/testing/index.ts",
     "./testing/vitest": "./vibestack/testing/vitest.ts",
     "./testing/generate": "./vibestack/testing/generate.ts",
+    "./testing/workers": "./vibestack/testing/workers.ts",
     "./stories": "./vibestack/stories/meta.ts",
     "./stories/storybook": "./vibestack/stories/storybook.ts",
+    "./cloudflare": "./vibestack/cloudflare/workers.vibe",
     "./design/eslint": "./vibestack/design/eslint.ts",
     "./package.json": "./package.json"
   },
@@ -118,8 +121,10 @@
       "./testing": "./dist/testing/index.js",
       "./testing/vitest": "./dist/testing/vitest.js",
       "./testing/generate": "./dist/testing/generate.js",
+      "./testing/workers": "./dist/testing/workers.js",
       "./stories": "./dist/stories/meta.js",
       "./stories/storybook": "./dist/stories/storybook.js",
+      "./cloudflare": "./dist/cloudflare/workers.js",
       "./design/eslint": "./dist/design/eslint.js",
       "./package.json": "./package.json"
     }

@@ -14,3 +14,7 @@ generated/
 storybook-static/
 .vibe/
 build/
+# wrangler dev's local state, and the release train's preview configs and run records (cf-release-train).
+.wrangler/
+.wrangler.preview.*
+.deploy/.*

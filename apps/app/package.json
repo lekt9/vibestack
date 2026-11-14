@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "wrangler dev",
+    "build": "vite build && vite build --ssr src/worker.vibe",
     "typecheck": "vibelang --noEmit -p .",
     "test": "vitest run",
     "test:browser": "vitest run --project browser"
@@ -33,6 +33,7 @@
     "vibelang-vite": "0.0.13",
     "vibestack": "workspace:*",
     "vite": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
   }
 }

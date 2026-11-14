@@ -1,0 +1,49 @@
+// The platform's stores on Cloudflare's own D1 and KV, run locally by Miniflare (vibestack/cloudflare/workers.vibe).
+// The Durable Object store, the API and the Worker are walked end to end through apps/app's Worker: its journey test and
+// conformance driver.
+import { assert, it } from "@effect/vitest"
+import * as KeyValueStore from "effect/persistence/KeyValueStore"
+import { Miniflare } from "miniflare"
+import { type D1Database, type KVNamespace, d1Store, kvStore } from "../workers.vibe"
+
+/** A D1 database and a KV namespace of Miniflare's, gone at the end of the scope. */
+function bindings() {
+  return acquireRelease(tryPromise(async () => {
+    const mf = new Miniflare({
+      telemetry: { enabled: false }, cf: false, enableDevRegistry: false, logRequests: false, workers: [{ config: {
+        name: "stores", compatibilityDate: "2026-11-01",
+        manifest: { mainModule: "stores.mjs", modules: { "stores.mjs": { type: "esm", contents: "export default { fetch: () => new Response() }" } } },
+        env: { DB: { type: "d1", id: "stores" }, KV: { type: "kv", id: "stores" } }
+      } }]
+    })
+    return { mf, db: await mf.getD1Database("DB") as unknown as D1Database, kv: await mf.getKVNamespace("KV") as unknown as KVNamespace }
+  }), ({ mf }) => promise(() => mf.dispose()))
+}
+
+/** What a shell does with a store: write, overwrite, read back, list, count, forget, empty. */
+effect function roundTrip() {
+  const store = try KeyValueStore.KeyValueStore
+  try store.set("greeter", JSON.stringify({ name: "Ada", count: 1 }))
+  try store.set("greeter", JSON.stringify({ name: "Grace", count: 2 }))
+  try store.set("other", "x")
+  const read = try store.get("greeter")
+  const missing = try store.get("nobody")
+  const keys = [...try store.keys].sort()
+  const size = try store.size
+  try store.remove("other")
+  const afterRemove = try store.size
+  try store.clear
+  return { read, missing, keys, size, afterRemove, afterClear: try store.size }
+}
+
+const expected = { read: JSON.stringify({ name: "Grace", count: 2 }), missing: undefined, keys: ["greeter", "other"], size: 2, afterRemove: 1, afterClear: 0 }
+
+it.live("a store in D1 and one in KV hold what a shell writes, and give it back", () => scoped(effect {
+  const { db, kv } = try bindings()
+  let d1, kept, inKv
+  provide d1Store(db) { d1 = try roundTrip(); try (try KeyValueStore.KeyValueStore).set("kept", "1") }
+  // A second layer over the same table finds it made, and what was written through the first.
+  provide Layer.fresh(d1Store(db)) { kept = try (try KeyValueStore.KeyValueStore).get("kept") }
+  provide kvStore(kv) { inKv = try roundTrip() }
+  try Effect.try(() => assert.deepStrictEqual({ d1, kept, inKv }, { d1: expected, kept: "1", inKv: expected }))
+}))

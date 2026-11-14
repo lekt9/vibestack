@@ -1,0 +1,138 @@
+// .claude/skills/shell/SKILL.md, "On Cloudflare Workers": the platform a shell runs on as a Worker. A machine's state
+// lives in a Durable Object per key, which takes one request at a time, behind the same `KeyValueStore` a Node shell
+// uses; D1 and KV stores are here for state that is shared rather than a machine's. The Cloudflare types are the few
+// members used, so nothing here needs workerd's globals and Vitest runs it in Node.
+import * as KeyValueStore from "effect/persistence/KeyValueStore"
+
+export { worker } from "./worker.ts"
+
+/** The part of a Durable Object's `ctx.storage` a store uses. */
+export interface DurableStorage {
+  get(key: string): Promise<unknown>
+  put(key: string, value: string): Promise<void>
+  delete(key: string): Promise<boolean>
+  deleteAll(): Promise<void>
+  list(): Promise<Map<string, unknown>>
+}
+
+/** The part of a D1 database a store uses. */
+export interface D1Database { prepare(sql: string): D1Statement }
+interface D1Statement {
+  bind(...values: unknown[]): D1Statement
+  first(): Promise<Record<string, unknown> | null>
+  run(): Promise<unknown>
+  all(): Promise<{ results: Record<string, unknown>[] }>
+}
+
+/** The part of a KV namespace a store uses. */
+export interface KVNamespace {
+  get(key: string): Promise<string | null>
+  put(key: string, value: string): Promise<void>
+  delete(key: string): Promise<void>
+  list(options?: { cursor?: string }): Promise<{ keys: { name: string }[]; list_complete: boolean; cursor?: string }>
+}
+
+/** One call to a binding, failing as the store's error. */
+function call<A>(method: string, run: () => Promise<A>, key?: string) {
+  return tryPromise({ try: run, catch: (cause) => new KeyValueStore.KeyValueStoreError({ method, key, message: `the binding's ${method} failed`, cause }) })
+}
+
+/** A store in a Durable Object's own storage: strongly consistent, and only the object that owns it can reach it. */
+export function durableStore(storage: DurableStorage) {
+  return Layer.succeed(KeyValueStore.KeyValueStore, KeyValueStore.makeStringOnly({
+    get: (key) => map(call("get", () => storage.get(key), key), (value) => typeof value === "string" ? value : undefined),
+    set: (key, value) => call("set", () => storage.put(key, value), key),
+    remove: (key) => asVoid(call("remove", () => storage.delete(key), key)),
+    clear: call("clear", () => storage.deleteAll()),
+    size: map(call("size", () => storage.list()), (all) => all.size),
+    keys: map(call("keys", () => storage.list()), (all) => [...all.keys()])
+  }))
+}
+
+/** A store in the D1 table `kv`, made if missing. Every Worker bound to the database shares it. */
+export function d1Store(db: D1Database) {
+  return Layer.effect(KeyValueStore.KeyValueStore, effect {
+    try call("create", () => db.prepare("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run())
+    const column = (row: Record<string, unknown> | null, name: string) => row === null ? undefined : row[name]
+    return KeyValueStore.makeStringOnly({
+      get: (key) => map(call("get", () => db.prepare("SELECT value FROM kv WHERE key = ?").bind(key).first(), key), (row) => String(column(row, "value") ?? "") || undefined),
+      set: (key, value) => asVoid(call("set", () => db.prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").bind(key, value).run(), key)),
+      remove: (key) => asVoid(call("remove", () => db.prepare("DELETE FROM kv WHERE key = ?").bind(key).run(), key)),
+      clear: asVoid(call("clear", () => db.prepare("DELETE FROM kv").run())),
+      size: map(call("size", () => db.prepare("SELECT count(*) AS n FROM kv").first()), (row) => Number(column(row, "n") ?? 0)),
+      keys: map(call("keys", () => db.prepare("SELECT key FROM kv").all()), ({ results }) => results.map((row) => String(row.key)))
+    })
+  })
+}
+
+/** A store in a KV namespace: eventually consistent across locations, so for what may be read a minute stale. */
+export function kvStore(namespace: KVNamespace) {
+  effect function keys() {
+    const all: string[] = []
+    let cursor: string | undefined = undefined
+    while (true) {
+      const page = try call("keys", () => namespace.list({ cursor }))
+      all.push(...page.keys.map((k) => k.name))
+      if (page.list_complete || page.cursor === undefined) return all
+      cursor = page.cursor
+    }
+  }
+  return Layer.succeed(KeyValueStore.KeyValueStore, KeyValueStore.makeStringOnly({
+    get: (key) => map(call("get", () => namespace.get(key), key), (value) => value ?? undefined),
+    set: (key, value) => call("set", () => namespace.put(key, value), key),
+    remove: (key) => call("remove", () => namespace.delete(key), key),
+    clear: effect { for (const key of try keys()) try call("remove", () => namespace.delete(key), key) },
+    size: map(keys(), (all) => all.length),
+    keys: keys()
+  }))
+}
+
+const noStore = { "cache-control": "no-store" }
+
+/** What the generated adapter's failures mean to a caller over HTTP (gen/<name>.effect.vibe, "Rejected", "NotAnEvent"). */
+function status(error: { readonly _tag?: string }) {
+  return error._tag === "NotAnEvent" ? 400 : error._tag === "Rejected" ? 409 : 503
+}
+
+/**
+ * The HTTP API of one machine at `/api/<name>/:key`: GET reads its state, POST sends one untrusted input as JSON. A
+ * refusal by the decoder is 400, by the rules 409 with the state that refused it, and any other failure (the store did
+ * not take it) is 503 and changes nothing. A cross-site page cannot send JSON without a preflight, which is never granted.
+ */
+export function machineApi<S, E extends { readonly _tag?: string }, R1, R2>(name: string, current: S!!R1, receive: (input: unknown) => S!E!R2) {
+  const route = `/api/${name}/:key` as const
+  effect function post() {
+    const request = try HttpServerRequest.HttpServerRequest
+    if (!request.headers["content-type"]?.startsWith("application/json"))
+      return try HttpServerResponse.json({ error: "send application/json" }, { status: 415, headers: noStore })
+    const input = request.json catch () => undefined
+    return try (receive(input) |> flatMap(%, (state) => HttpServerResponse.json(state, { headers: noStore })) |> Effect.catch(%, effect (error) => {
+      const code = status(error)
+      return try HttpServerResponse.json({ error: error._tag ?? "failed", ...code === 409 ? { state: try current } : {} }, { status: code, headers: noStore })
+    }))
+  }
+  return Layer.mergeAll(
+    HttpRouter.add("GET", route, flatMap(current, (state) => HttpServerResponse.json(state, { headers: noStore }))),
+    HttpRouter.add("POST", route, provideService(post(), HttpServerRequest.MaxBodySize, ByteSize.kibibytes(64)))
+  )
+}
+
+/** A Durable Object's view of itself, as its constructor receives it. */
+export interface DurableState { readonly storage: DurableStorage }
+
+/**
+ * A Durable Object class whose every instance serves `routes` (a `machineApi`, merged with the layer that provides its
+ * machine) over a store in its own storage, built once per instance. The Worker sends each key to its own instance, so
+ * one machine's events are applied one at a time, in one place.
+ */
+export function machineObject<A, E, X>(routes: Layer.Layer<A, E, HttpRouter.HttpRouter | KeyValueStore.KeyValueStore | HttpRouter.Request<"Error", X> | HttpRouter.Request<"Requires", A>>) {
+  return class {
+    readonly fetch: (request: Request) => Promise<Response>
+    constructor(state: DurableState) {
+      const { handler } = HttpRouter.toWebHandler(Layer.provide(routes, durableStore(state.storage)), { disableLogger: true })
+      // Its routes require only what the layer provides, which is what makes the context optional.
+      const serve = handler as (request: Request) => Promise<Response>
+      this.fetch = (request) => serve(request)
+    }
+  }
+}
