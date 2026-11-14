@@ -117,22 +117,40 @@ export function machineApi<S, E extends { readonly _tag?: string }, R1, R2>(name
   )
 }
 
+/** The keys of machines a gate, a journey or a simulated person makes (`conformance-…`, `journey-…`, `sim-…`): never a visitor's. */
+const THROWAWAY = /^(conformance|journey|sim)-/
+
+/** A DELETE of a throwaway machine (`THROWAWAY`): its storage emptied, so a gate on a deployed Worker leaves nothing behind. */
+effect function forget(request: Request, storage: DurableStorage) {
+  if (!THROWAWAY.test(request.url.split("?")[0].split("/").at(-1) ?? ""))
+    return HttpServerResponse.toWeb(try HttpServerResponse.json({ error: "only a gate's or a test's machine can be forgotten" }, { status: 405, headers: noStore }))
+  try call("clear", () => storage.deleteAll())
+  return HttpServerResponse.toWeb(HttpServerResponse.empty({ status: 204, headers: noStore }))
+}
+
 /** A Durable Object's view of itself, as its constructor receives it. */
 export interface DurableState { readonly storage: DurableStorage }
 
 /**
  * A Durable Object class whose every instance serves `routes` (a `machineApi`, merged with the layer that provides its
  * machine) over a store in its own storage, built once per instance. The Worker sends each key to its own instance, so
- * one machine's events are applied one at a time, in one place.
+ * one machine's events are applied one at a time, in one place. A DELETE forgets a throwaway machine (`forget`), and
+ * the next request builds it again from the emptied storage.
  */
 export function machineObject<A, E, X>(routes: Layer.Layer<A, E, HttpRouter.HttpRouter | KeyValueStore.KeyValueStore | HttpRouter.Request<"Error", X> | HttpRouter.Request<"Requires", A>>) {
   return class {
     readonly fetch: (request: Request) => Promise<Response>
     constructor(state: DurableState) {
-      const { handler } = HttpRouter.toWebHandler(Layer.provide(routes, durableStore(state.storage)), { disableLogger: true })
+      const build = () => HttpRouter.toWebHandler(Layer.provide(routes, durableStore(state.storage)), { disableLogger: true })
+      let web = build()
       // Its routes require only what the layer provides, which is what makes the context optional.
-      const serve = handler as (request: Request) => Promise<Response>
-      this.fetch = (request) => serve(request)
+      const serve = (request: Request) => (web.handler as (request: Request) => Promise<Response>)(request)
+      const forgotten = (request: Request) => runPromise(effect {
+        const answer = try forget(request, state.storage)
+        if (answer.status === 204) { const old = web; web = build(); try promise(() => old.dispose()) }
+        return answer
+      })
+      this.fetch = (request) => request.method === "DELETE" ? forgotten(request) : serve(request)
     }
   }
 }

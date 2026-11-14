@@ -6,10 +6,19 @@ import type { Driver, Options } from "../../gen/app.conformance.ts";
 import type { Greeter } from "../../gen/app.ts";
 
 const running = await worker(new URL("../..", import.meta.url));
-/** Each reset is a fresh set of greeters: keys no earlier run used. */
+/** Each reset is a fresh set of greeters: keys no earlier run used, each forgotten at the end (vibestack/cloudflare, `machineObject`). */
 const run = `conformance-${Date.now()}`;
 let fresh = 0;
-const at = (key: string) => `${running.url}/api/app/${run}-${fresh}-${key}`;
+const used = new Set<string>();
+const at = (key: string) => { const url = `${running.url}/api/app/${run}-${fresh}-${key}`; used.add(url); return url; };
+
+/** Every greeter this run made, forgotten, so a gate on a deployed Worker leaves nothing in its storage. */
+async function forget() {
+  for (const url of used) {
+    const answer = await fetch(url, { method: "DELETE" });
+    if (answer.status !== 204) throw new Error(`DELETE ${url}: ${answer.status} ${await answer.text()}`);
+  }
+}
 
 /** What the Worker did with `body`: 400 and 409 are its refusals (vibestack/cloudflare, `machineApi`); anything else but 200 is a failure. */
 async function send(key: string, body: string | undefined) {
@@ -28,7 +37,7 @@ export const driver: Driver & AsyncDisposable = {
     if (!answer.ok) throw new Error(`GET ${at(key)}: ${answer.status} ${await answer.text()}`);
     return await answer.json() as Greeter;
   },
-  [Symbol.asyncDispose]: () => running[Symbol.asyncDispose](),
+  async [Symbol.asyncDispose]() { await forget(); await running[Symbol.asyncDispose](); },
 };
 
 /** One greeter per key; two keys, so that one leaking into another shows. */

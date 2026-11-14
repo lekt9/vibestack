@@ -1,11 +1,12 @@
 // spec/app/index.md, "Story: Say hello"
 // The shell: the greeter of spec/app/index.md, kept in a KeyValueStore by `stored`, which worker.vibe runs in a Durable
-// Object over its storage; `remote` is the same service in the page, over the Worker's HTTP API.
+// Object over its storage; `visiting` is the same service in the page, on this visitor's own greeter, over the Worker's
+// HTTP API (`remote`).
 import * as KeyValueStore from "effect/persistence/KeyValueStore"
 import { type Greeter, NotAnEvent, Rejected, apply, decodeEvent, decodeState, initial, parseState } from "../gen/app.effect.vibe"
 import { Saved } from "./greeter.schema.ts"
 
-const KEY = "greeter"
+const KEY = "greeter", VISITOR = "visitor"
 
 /** The store did not take the greeter, or could not be reached to; it stays as it was. */
 export error NotSaved { cause: unknown }
@@ -44,7 +45,7 @@ export const stored = Layer.effect(Greetings, effect {
  * `Greetings` of the greeter `key` that the Worker at `base` holds (worker.vibe; vibestack/cloudflare, `machineApi`).
  * The Worker decides; this only says what it answered, one input at a time, and shows a greeter only once it is stored.
  */
-export function remote(base: string, key: string) {
+function remote(base: string, key: string) {
   return Layer.effect(Greetings, effect {
     const client = HttpClient.mapRequest(try HttpClient.HttpClient, HttpClientRequest.prependUrl(base))
     const at = `/api/app/${encodeURIComponent(key)}`
@@ -63,4 +64,22 @@ export function remote(base: string, key: string) {
       })
     }
   })
+}
+
+/** This browser's greeter key: made on its first visit and kept in its store (one that cannot keep it makes one per visit). */
+effect function visitor() {
+  const store = try KeyValueStore.KeyValueStore
+  const kept = store.get(VISITOR) catch () => undefined
+  if (kept) return kept
+  const made = `visitor-${(try Random.nextInt).toString(36)}${(try Random.nextInt).toString(36)}`
+  store.set(VISITOR, made) catch () => undefined
+  return made
+}
+
+/**
+ * `remote` of this visitor's own greeter (spec/app/index.md, "Story: Say hello"): `key` where the page's address names
+ * one (`?key=`, as a simulated person's does, so its oracle reads only what that person did), else this browser's.
+ */
+export function visiting(base: string, key: string | null) {
+  return Layer.unwrap(effect { return remote(base, key ?? (try visitor())) })
 }

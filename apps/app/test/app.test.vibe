@@ -1,10 +1,10 @@
 // The shell of src/greeter.vibe across a reload: what the conformance driver (test/drivers/app.ts) cannot see, which is
-// a greeter started again from its store, a store holding what is not one, and the page's `remote` over the Worker.
+// a greeter started again from its store, a store holding what is not one, and the page's `visiting` over the Worker.
 import { assert, it, layer } from "@effect/vitest"
 import * as KeyValueStore from "effect/persistence/KeyValueStore"
-import { FetchHttpClient } from "effect/http"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { stateDir, worker } from "vibestack/testing/workers"
-import { Greetings, load, remote, stored } from "../src/greeter.vibe"
+import { Greetings, load, stored, visiting } from "../src/greeter.vibe"
 
 /** The greeter a page opened now would show. */
 effect function reopened() { return Option.getOrUndefined(try Stream.runHead(Context.get(try Layer.build(stored), Greetings).changes)) }
@@ -35,30 +35,57 @@ function running(persist: string) {
   return acquireRelease(tryPromise(() => worker(new URL("..", import.meta.url), { persist })), (w) => promise(() => w[Symbol.asyncDispose]()))
 }
 
-/** The greeter `key` as a page served by `url` shows it, and what it says to each input. */
-effect function page(url: string, key: string, inputs: unknown[]) {
-  const greetings = Context.get(try Layer.build(Layer.provide(remote(url, key), FetchHttpClient.layer)), Greetings)
+/** A browser's own store, as its localStorage is: kept from one visit to the next. */
+effect function browser() { return Context.get(try Layer.build(KeyValueStore.layerMemory), KeyValueStore.KeyValueStore) }
+
+/** The greeter a page served by `url` shows in `store`'s browser, on the key its address names (`?key=`) or else that browser's own, and what it says to each input. */
+effect function page(url: string, key: string | null, inputs: unknown[], store: KeyValueStore.KeyValueStore) {
+  const greetings = Context.get(try Layer.build(Layer.provide(visiting(url, key), Layer.merge(FetchHttpClient.layer, Layer.succeed(KeyValueStore.KeyValueStore, store)))), Greetings)
   const said: unknown[] = []
   for (const input of inputs) said.push(greetings.receive(input) catch (error) => error._tag)
   return { shown: Option.getOrUndefined(try Stream.runHead(greetings.changes)), said }
 }
 
+/** What the Worker at `url` answers when asked to forget the greeter `key`: only a gate's or a test's may be (vibestack/cloudflare, `machineObject`). */
+effect function forget(url: string, key: string) {
+  provide FetchHttpClient.layer { return (try HttpClient.execute(HttpClientRequest.delete(`${url}/api/app/${key}`))).status }
+}
+
 // spec/app/index.md, "Story: Say hello"
-// Through the Worker: the page's `remote`, the HTTP API, the Durable Object and its storage, across a restart.
+// Through the Worker: the page's `visiting`, the HTTP API, the Durable Object and its storage, across a restart.
 it.live("Say hello on the Worker, then start it again", () => effect {
   const persist = try Effect.try(() => stateDir())
   const key = `journey-${try Clock.currentTimeMillis}-${try Random.nextInt}`
   const first = try scoped(effect {
     const { url } = try running(persist)
     // spec/app/index.md, "Only a name that is not empty can be greeted"
-    return try page(url, key, [{ type: "greet", name: "Ada" }, { type: "greet", name: "" }, { type: "greet" }, { type: "greet", name: "Grace" }])
+    return try page(url, key, [{ type: "greet", name: "Ada" }, { type: "greet", name: "" }, { type: "greet" }, { type: "greet", name: "Grace" }], try browser())
   })
   const again = try scoped(effect {
     const { url } = try running(persist)
-    return try page(url, key, [])
+    // Each browser is greeted on a greeter of its own, kept from one visit to the next: not by the last name anyone typed.
+    // (Ada's browser keeps a throwaway key, so that a journey on a deployed Worker leaves nothing behind.)
+    const ada = try browser(), grace = try browser()
+    try ada.set("visitor", `${key}-ada`)
+    const seen = [
+      try page(url, key, [], try browser()),
+      try page(url, null, [{ type: "greet", name: "Ada" }], ada),
+      try page(url, null, [], grace),
+      try page(url, null, [], ada)
+    ]
+    // A gate's or a test's greeter is forgotten when asked, and a visitor's never is.
+    const forgot = [try forget(url, key), try forget(url, `${key}-ada`), try forget(url, "someone")]
+    return [...seen, forgot, try page(url, key, [], try browser())]
   })
   try Effect.try(() => assert.deepStrictEqual([first, again], [
     { shown: { name: "Grace", count: 2 }, said: [{ name: "Ada", count: 1 }, "Rejected", "NotAnEvent", { name: "Grace", count: 2 }] },
-    { shown: { name: "Grace", count: 2 }, said: [] }
+    [
+      { shown: { name: "Grace", count: 2 }, said: [] },
+      { shown: { name: "Ada", count: 1 }, said: [{ name: "Ada", count: 1 }] },
+      { shown: { name: "", count: 0 }, said: [] },
+      { shown: { name: "Ada", count: 1 }, said: [] },
+      [204, 204, 405],
+      { shown: { name: "", count: 0 }, said: [] }
+    ]
   ]))
 })

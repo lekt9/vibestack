@@ -29,11 +29,12 @@ function scenario(spec: Spec, story: Story, surface: Surface): Scenario {
     surface: surface.name,
     story: `${spec.file}, "${story.title}"`,
     persona: { id: who.toLowerCase().replace(/[^a-z0-9]+/g, "-"), about: `a ${who}, in the words of ${spec.file}` },
-    // sim.mjs fills {DEPLOY_URL_…} from the gate's environment, as the shell does $DEPLOY_URL_… in the oracle.
-    task: `I am on the site at {${variable}}. I want to ${want}.`,
+    // sim.mjs fills {DEPLOY_URL_…} from the gate's environment, as the shell does $DEPLOY_URL_… in the oracle, and {run}
+    // with this run's id: the page's `?key=` gives the person a machine of their own, so only what they did can change it.
+    task: `I am on the site at {${variable}}/?key=sim-{run}. I want to ${want}.`,
     oracles: [{
-      name: `the deployed ${spec.name} changed, into a state ${spec.file} allows`,
-      cmd: `node vibestack/spec.ts observe ${spec.name} "$${variable}" --run {run}`,
+      name: `the person's own ${spec.name} changed, into a state ${spec.file} allows`,
+      cmd: `node vibestack/spec.ts observe ${spec.name} "$${variable}" --key sim-{run} --run {run}`,
       marker: "OBSERVED_CHANGE",
     }],
   };
@@ -89,23 +90,25 @@ export function train(root: string, check = false): { ok: boolean; lines: string
 }
 
 /**
- * Read the deployed `module` at `url`: its page answers, and the state of the key its page uses (the module's name)
- * is one the generated module accepts. With `run`, the first read is remembered under .spec-cache/observed and fails;
- * a later one passes only if the state has changed since: an oracle that is false before the person acts.
+ * Read the deployed `module` at `url`: its page answers, and the state of its machine `key` (by default the module's
+ * name) is one the generated module accepts. With `run`, the first read is remembered under .spec-cache/observed and
+ * fails; a later one passes only if the state has changed since: an oracle that is false before the person acts, on a
+ * key only that person's page uses (`?key=`), so no one else's change can pass it.
  */
-export async function observe(root: string, module: string, url: string, run?: string): Promise<{ ok: boolean; line: string }> {
+export async function observe(root: string, module: string, url: string, run?: string, key = module): Promise<{ ok: boolean; line: string }> {
   const base = url.replace(/\/+$/, "");
   if (!/^https?:\/\//.test(base)) return { ok: false, line: `OBSERVE_FAIL ${module}: "${url}" is no address (is the gate's DEPLOY_URL_ variable set?)` };
   const page = await fetch(`${base}/`);
   if (!page.ok || !(page.headers.get("content-type") ?? "").includes("text/html")) return { ok: false, line: `OBSERVE_FAIL ${module}: ${base}/ answered ${page.status} ${page.headers.get("content-type") ?? ""}` };
-  const answer = await fetch(`${base}/api/${module}/${module}`);
+  if (!/^[\w-]{1,80}$/.test(key)) return { ok: false, line: `OBSERVE_FAIL ${module}: --key ${key} is no key` };
+  const answer = await fetch(`${base}/api/${module}/${key}`);
   const said: unknown = await answer.json().catch(() => undefined);
   const { parseState } = await import(pathToFileURL(path.join(root, "gen", `${module}.ts`)).href) as { parseState(x: unknown): unknown };
-  if (!answer.ok || parseState(said) === undefined) return { ok: false, line: `OBSERVE_FAIL ${module}: /api/${module}/${module} answered ${answer.status} ${JSON.stringify(said)}, which is no state of gen/${module}.ts` };
+  if (!answer.ok || parseState(said) === undefined) return { ok: false, line: `OBSERVE_FAIL ${module}: /api/${module}/${key} answered ${answer.status} ${JSON.stringify(said)}, which is no state of gen/${module}.ts` };
   const state = JSON.stringify(said);
   if (run === undefined) return { ok: true, line: `OBSERVED ${module} state=${state}` };
   if (!/^[\w-]{1,64}$/.test(run)) return { ok: false, line: `OBSERVE_FAIL ${module}: --run ${run} is no run id` };
-  const remembered = path.join(root, ".spec-cache", "observed", `${module}-${run}.json`);
+  const remembered = path.join(root, ".spec-cache", "observed", `${module}-${key}-${run}.json`);
   if (!fs.existsSync(remembered)) {
     fs.mkdirSync(path.dirname(remembered), { recursive: true });
     fs.writeFileSync(remembered, state);

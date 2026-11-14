@@ -663,7 +663,7 @@ const isMain = (): boolean => {
   }
 };
 
-const USAGE = "usage: spec check [<directory>] [--json] [--nightly] | watch [<directory>] | gen [<directory>] [--if-valid] | accept [<directory>] [unproved] | new [<path>] | train [<directory>] [--check] | observe <module> <url> [--run <id>] | init [<directory>] | migrate [<directory>] | studio [<directory>] [--port <n>] | tests [<directory>] | stories gen [--watch] [--check] | tokens build|check|apply | tasks [<task>…]";
+const USAGE = "usage: spec check [<directory>] [--json] [--nightly] | watch [<directory>] | gen [<directory>] [--if-valid] | accept [<directory>] [unproved] | new [<path>] | train [<directory>] [--check] | observe <module> <url> [--key <key>] [--run <id>] | init [<directory>] | migrate [<directory>] | studio [<directory>] [--port <n>] | tests [<directory>] | stories gen [--watch] [--check] | tokens build|check|apply | tasks [<task>…]";
 
 /**
  * Check, then check again whenever spec/, package.json, tsconfig.json, or src/ or test/ of the root or of an owner changes. One process stays warm between runs
@@ -821,8 +821,9 @@ if (isMain()) {
       const { ok, lines } = (await import("./train.ts")).train(root, args[0] === "--check");
       console.log(lines.join("\n"));
       process.exitCode = ok ? 0 : 1;
-    } else if (command === "observe" && takes(["*", "*"], ["*", "*", "--run", "*"])) {
-      const { ok, line } = await (await import("./train.ts")).observe(root, args[0], args[1], args[3]);
+    } else if (command === "observe" && takes(["*", "*"], ["*", "*", "--run", "*"], ["*", "*", "--key", "*"], ["*", "*", "--key", "*", "--run", "*"])) {
+      const option = (name: string) => { const i = args.indexOf(name); return i > 1 ? args[i + 1] : undefined; };
+      const { ok, line } = await (await import("./train.ts")).observe(root, args[0], args[1], option("--run"), option("--key"));
       console.log(line);
       process.exitCode = ok ? 0 : 1;
     } else {
