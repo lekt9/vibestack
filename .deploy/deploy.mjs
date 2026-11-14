@@ -201,6 +201,7 @@ async function main() {
   if (cmd === "soak") return soak(root, manifestPath, argv[1] ?? "staging");
   if (cmd === "drill") return drill(root, manifestPath, argv[1] ?? "staging");
   if (!ENVS.includes(cmd)) { console.error(`usage: deploy.mjs <${ENVS.join("|")}|checks|coverage|gate <env>|watch <env> [--rollback]|drill <env>|soak <env>|env-for> [--branch b] [--dry-run] [--delete] [--only worker] [--no-gate]`); process.exit(2); }
+  if (flag("no-gate") && ["preprod", "production"].includes(cmd)) { console.error(`--no-gate is refused for ${cmd}: its gates are what stand between the code and customers`); process.exit(2); }
   if (!existsSync(manifestPath)) { console.error(`no ${manifestPath}: copy the skill's assets/manifest.example.json and fill it in`); process.exit(2); }
   const m = JSON.parse(readFileSync(manifestPath, "utf8")), env = cmd, dry = flag("dry-run");
   const workers = (m.workers ?? []).filter((w) => !arg("only") || w.name === arg("only"));
@@ -251,6 +252,14 @@ async function main() {
   const soaks = !dry && !slug && SOAK_ENVS.includes(env) && existsSync(trafficScript());
   if (soaks) { const s = sh("node", [trafficScript(), "stop", env, "--root", root, "--manifest", manifestPath, "--why", `deploying ${env} again`], { cwd: root }); if (/TRAFFIC_STOPPED/.test(s.out)) log(s.out.trim()); }
   const before = new Map(); // Worker → the version it ran before this deploy (to roll back to)
+  const fresh = new Set(); // previews of their own deployed for the first time: deleted, not left live, when they fail
+  // What a failed deploy leaves: each Worker back on its version before, a new preview deleted, and the rest named.
+  const undo = () => {
+    const back = rollback(before, root, log);
+    const gone = done.map((d) => d.name).filter((n) => fresh.has(n)).filter((n) => { const r = wrangler(["delete", "--name", n, "--force"], { cwd: root }); log(`${r.code === 0 ? "deleted" : "NOT DELETED"} ${n}`); return r.code === 0; });
+    const broken = done.map((d) => d.name).filter((n) => !back.includes(n) && !gone.includes(n));
+    return `rolled_back=${back.length}${gone.length ? ` deleted=${gone.length}` : ""}${broken.length ? ` left_broken=${broken.join(",")}` : ""}`;
+  };
   const again = []; // previews first deployed without their sibling bindings (a circle of bindings)
   for (const p of plan) {
     if (p.skip) { log(`skip ${p.w.name}: ${p.skip}`); continue; }
@@ -274,9 +283,10 @@ async function main() {
     } else args = ["deploy", "-c", config];
     if (process.env.GITHUB_SHA && args[0] === "deploy") args.push("--tag", process.env.GITHUB_SHA.slice(0, 12), "--message", `${env} ${process.env.GITHUB_REF_NAME ?? ""} ${process.env.GITHUB_SHA.slice(0, 7)}`.trim());
     if (dry) args.push("--dry-run");
-    if (!dry && env !== "preview") {
+    if (!dry && (env !== "preview" || p.ownWorker)) { // (an alias preview has no version of its own to go back to)
       const d = wrangler(["deployments", "status", "-c", config, "--json"], { cwd: root });
-      try { before.set(name, { config, version: JSON.parse(d.out.slice(d.out.indexOf("{"))).versions?.[0]?.version_id }); } catch { /* a first deploy: nothing to roll back to */ }
+      let version = ""; try { version = JSON.parse(d.out.slice(d.out.indexOf("{"))).versions?.[0]?.version_id ?? ""; } catch { /* a first deploy: nothing to roll back to */ }
+      if (version) before.set(name, { config, version }); else if (env === "preview") fresh.add(name);
     }
     log(`${dry ? "would run" : "run"}: wrangler ${args.map((a) => (a.includes(" ") ? JSON.stringify(a) : a)).join(" ")}`);
     let r = wrangler(args, { cwd: root });
@@ -295,7 +305,7 @@ async function main() {
       if (first.code === 0) { log(`deployed ${name} without its sibling bindings first (a circle); whole again after the others`); again.push({ name, args }); r = first; }
       else r = { code: first.code, out: `${r.out.slice(-1200)}\n--- and without its sibling bindings ---\n${first.out.slice(-1500)}` };
     }
-    if (r.code) { console.error(`deploy failed for ${name}:\n${r.out.slice(-3000)}`); rollback(before, root, log); if (env !== "preview") ledger(root, env, "failed", "", log); process.exit(1); }
+    if (r.code) { console.error(`deploy failed for ${name}:\n${r.out.slice(-3000)}`); before.delete(name); log(undo()); if (env !== "preview") ledger(root, env, "failed", "", log); process.exit(1); }
     // Secrets a new Worker has none of: given as one JSON object in the environment (a GitHub environment secret).
     if (!dry && env === "preview" && p.ownWorker && process.env.WORKER_SECRETS) {
       const s = spawnSync("npx", ["--no-install", "wrangler", "secret", "bulk", "--name", name], { cwd: root, input: process.env.WORKER_SECRETS, encoding: "utf8" });
@@ -315,7 +325,7 @@ async function main() {
   // The gate: what must hold on the deployed thing before anything is promoted past it.
   const gates = flag("no-gate") || dry ? [] : (m.gates?.[env] ?? m.gates?.default ?? []);
   const g = runGates(gates, { root, env, done, log });
-  if (g.failed) { rollback(before, root, log); if (!slug && done.length) ledger(root, env, "rolled_back", `${g.passed}/${gates.length}`, log); console.log(`DEPLOY_FAIL env=${env} gate=${JSON.stringify(g.failed)} rolled_back=${before.size}`); process.exit(1); }
+  if (g.failed) { const left = undo(); if (!slug && done.length) ledger(root, env, "rolled_back", `${g.passed}/${gates.length}`, log); console.log(`DEPLOY_FAIL env=${env} gate=${JSON.stringify(g.failed)} ${left}`); process.exit(1); }
   const passed = g.passed;
   if (gates.length && !slug) stamp(root, env, passed, Object.fromEntries(before));
   if (!dry && !slug && done.length) ledger(root, env, "ok", `${passed}/${gates.length}`, log); // (nothing deployed, nothing to record)
@@ -414,7 +424,7 @@ function gateOnly(root, manifestPath, env, kind = "gates") {
     if (seen.unknown) { console.log(`WATCH_UNKNOWN env=${env}: "${seen.unknown}" could not ask (exit 2); nothing was decided and nothing was rolled back`); process.exit(2); }
     if (seen.failed && flag("rollback")) {
       // What the gate could not see at deploy time went wrong later: back to the version before, and the pass is withdrawn.
-      const prev = previousVersions(root, env, m), back = rollback(prev, root, (s) => console.log(s), "the watch after the deploy failed");
+      const prev = previousVersions(root, env, m), back = rollback(prev, root, (s) => console.log(s), "the watch after the deploy failed").length;
       const all = readStamps(root); delete all[env]; writeFileSync(stampsPath(root), JSON.stringify(all, null, 2));
       if (back) ledger(root, env, "rolled_back", `watch ${seen.passed}/${list.length}`, (s) => console.log(s));
       console.log(`WATCH_FAIL env=${env} watch=${JSON.stringify(seen.failed)} passed=${seen.passed}/${list.length} rolled_back=${back}${prev.size ? "" : " (there is no record of the version before this deploy: roll back by hand)"}`);
@@ -467,21 +477,35 @@ function coverageOf(root, manifestPath) {
   const sims = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => { try { return JSON.parse(readFileSync(join(dir, f), "utf8")); } catch { return { name: f, surface: "(unreadable)" }; } }) : [];
   const detected = (m.workers ?? []).flatMap((w) => { const c = w.envs?.production?.config ?? w.envs?.staging?.config; try { return detectSurfaces(parseJsonc(readFileSync(join(root, c), "utf8"))); } catch { return []; } });
   const c = coverage(m, { sims, detected }), v = vibestackCoverage(root, m, sims);
+  c.bad.push(...buildProblems(root, m)); c.ok = !c.bad.length;
   // A vibestack project: its spec says what else must be covered (a simulated person per story, the rules proved by a
   // check, conformance walked on the deployed Worker, review read before a release: vibestack.mjs).
   if (v) { c.bad.push(...v.bad); c.lines.push(...v.lines); Object.assign(c.counts, v.counts); c.ok = !c.bad.length; }
   return c;
 }
+/** Wrangler runs a config's build.command in the cwd the train deploys from (the repo root), not beside the config: a
+ *  Worker of a package whose build does not name that package would deploy whatever its folder last held. */
+function buildProblems(root, m) {
+  const configs = new Set((m.workers ?? []).flatMap((w) => Object.values(w.envs ?? {}).map((e) => e.config).filter(Boolean)));
+  return [...configs].flatMap((config) => {
+    const dir = dirname(config), command = (() => { try { return parseJsonc(readFileSync(join(root, config), "utf8")).build?.command; } catch { return undefined; } })();
+    if (dir === "." || !command) return [];
+    let pkg = ""; try { pkg = JSON.parse(readFileSync(join(root, dir, "package.json"), "utf8")).name ?? ""; } catch { /* a folder that is not a package */ }
+    const names = [dir, `./${dir}`, ...(pkg ? [pkg] : [])].map((x) => x.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|");
+    if (new RegExp(`(-C|--dir|--prefix|--filter|-F|cd)[ =](${names})(\\s|$|&|;)`).test(command)) return [];
+    return [`${config}: build.command "${command}" runs in the repo root, so it builds the root and not ${dir}: name the folder (pnpm -C ${dir} build)${pkg ? ` or the package (pnpm --filter ${pkg} build)` : ""}`];
+  });
+}
 function coverageMarker(c) { return `COVERAGE_OK surfaces=${c.counts.surfaces} unit=${c.counts.unit} e2e=${c.counts.e2e} user=${c.counts.user} waived=${c.counts.waived}${"stories" in c.counts ? ` stories=${c.counts.stories} rules=${c.counts.rules}` : ""}`; }
 
-/** Put each Worker back on the version it ran before. Returns how many went back. */
+/** Put each Worker back on the version it ran before. Returns the names of those that went back. */
 function rollback(before, root, log, why = "gate failed after deploy") {
-  let n = 0;
+  const n = [];
   for (const [name, b] of before) {
     if (!b.version) continue;
     const r = wrangler(["rollback", b.version, "-c", b.config, "--message", why, "-y"], { cwd: root });
     log(`${r.code === 0 ? "rolled back" : "ROLLBACK FAILED for"} ${name} to ${String(b.version).slice(0, 8)}`);
-    if (r.code === 0) n++;
+    if (r.code === 0) n.push(name);
   }
   return n;
 }
@@ -525,10 +549,10 @@ function drill(root, manifestPath, env) {
     done.push({ name, key: w.name, url: m.subdomain ? `https://${name}.${m.subdomain}.workers.dev` : "" });
   }
   if (!back.size) { console.log(`ROLLBACK_DRILL_FAIL env=${env}: the manifest has no Worker there`); process.exit(1); }
-  const went = rollback(back, root, log, "rollback drill");
+  const went = rollback(back, root, log, "rollback drill").length;
   const gates = m.drill?.[env] ?? m.gates?.[env] ?? m.gates?.default ?? [], g = went === back.size ? runGates(gates, { root, env, done, log, label: "drill" }) : { passed: 0, failed: "the rollback itself" };
   // (Nothing went back: there is nothing to bring forward.)
-  const forward = went ? rollback(now, root, (s) => log(s.replace("rolled back", "came forward:").replace(" to ", " is on ")), "rollback drill: forward again") : now.size;
+  const forward = went ? rollback(now, root, (s) => log(s.replace("rolled back", "came forward:").replace(" to ", " is on ")), "rollback drill: forward again").length : now.size;
   if (forward !== now.size) { console.log(`ROLLBACK_DRILL_FAIL env=${env} COULD NOT COME FORWARD AGAIN: ${env} is on the older version. Run \`deploy.mjs ${env}\` now`); process.exit(1); }
   ledger(root, env, "ok", `drill ${g.passed}/${gates.length}`, log);
   if (g.failed) { console.log(`ROLLBACK_DRILL_FAIL env=${env} ${went === back.size ? `the version before does not pass ${JSON.stringify(g.failed)}: rolling back would not have helped` : "Cloudflare refused the rollback (a migration in this version forbids it?): a real failure could not be rolled back either"}; ${env} is back on the current version`); process.exit(1); }

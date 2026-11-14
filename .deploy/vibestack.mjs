@@ -166,7 +166,8 @@ function main() {
   let report;
   try { report = JSON.parse(out.slice(at)); } catch { console.log(`VIBESTACK_FAIL env=${where} \`spec check --json\` gave no report (exit ${r.status}):\n${`${out}${r.stderr ?? ""}`.slice(-1500)}`); process.exit(1); }
   let unproved = {};
-  try { unproved = JSON.parse(readFileSync(join(root, "spec", "lock.json"), "utf8")).unproved ?? {}; } catch { /* no ledger yet: nothing recorded */ }
+  const lock = join(root, "spec", "lock.json"); // no ledger yet: nothing recorded; one that cannot be read fails, never passes
+  if (existsSync(lock)) try { unproved = JSON.parse(readFileSync(lock, "utf8")).unproved ?? {}; } catch (e) { console.log(`VIBESTACK_FAIL env=${where} spec/lock.json cannot be read (${e.message}): it says which rules are unproved`); process.exit(1); }
   const v = verdict(report, { env, unproved, deployed: !!worker });
   for (const x of report.results ?? []) console.log(`${x.ok ? "ok  " : x.stage === "review" && !RELEASE.includes(env) ? "wait" : "FAIL"} [${x.stage}] ${x.summary}`);
   if (!v.ok) { console.log(`VIBESTACK_FAIL env=${where} ${v.why.length}:\n  ${v.why.join("\n  ")}`); process.exit(1); }
