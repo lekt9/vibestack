@@ -7,6 +7,11 @@
 //   node sim.mjs validate                                          scenarios parse and obey the rules (no network)
 //   node sim.mjs fabricate  [--count 3] [--focus "…"]              an agent writes new scenarios; each is proved on
 //                                                                  the target before it is kept
+//   node sim.mjs fabricate --from-spec                             a vibestack project: one scenario per story of its
+//                                                                  spec (the project's `spec train`, vibestack.mjs)
+//
+// A web surface (no sims.target): the agent acts through the browser MCP of sims.agent.servers on the address in its
+// task ({DEPLOY_URL_<WORKER>}, filled from the gate's environment), and its oracles are commands.
 //
 // The agent is headless Claude Code on the machine's own login (a subscription), or CLAUDE_CODE_OAUTH_TOKEN in CI. API
 // keys are taken out of its environment, and a run that still used one fails unless sims.agent.allowApiKey is true.
@@ -29,6 +34,7 @@ import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { train } from "./vibestack.mjs";
 
 const READ_ONLY = "^(read_|list_|get_|search_|query_|find_|describe_|recall$|whoami$|doc_history$|audit_log$|memory_status$|status$|health)";
 const KINDS = ["contains", "absent", "matches", "error"];
@@ -40,6 +46,9 @@ export function expandEnv(text, env = process.env) {
     return env[k];
   });
 }
+
+/** The addresses deploy.mjs gives a gate (DEPLOY_URL_<WORKER>), as values a task may name: {DEPLOY_URL_APP}. */
+export const deployUrls = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([k, v]) => /^DEPLOY_URL_[A-Z0-9_]+$/.test(k) && v));
 
 /** Every string in a value with {run} filled in: one id per run, so a scenario can be run again on the same target. */
 export function fill(value, vars) {
@@ -63,14 +72,14 @@ export function holds(expect = {}, answer) {
  * What is wrong with a scenario, as a list of plain sentences (empty when it is sound). `tools` is the target's tool
  * list when known: with it, a task that names a tool and an oracle that could write are caught.
  */
-export function problems(s, { personas = {}, readOnly = READ_ONLY, tools = [] } = {}) {
+export function problems(s, { personas = {}, readOnly = READ_ONLY, tools = [], web = false } = {}) {
   // A journey: several steps in order, each its own person and fresh agent, each step sound by the same rules.
   if (s && typeof s === "object" && Array.isArray(s.steps)) {
     const top = [];
     if (!/^[a-z0-9][a-z0-9-]{2,60}$/.test(s.name ?? "")) top.push("name: lower-case letters, digits and dashes (3-61)");
     if (!s.surface) top.push("surface: which surface of the manifest this exercises");
     if (!s.steps.length) top.push("steps: at least one");
-    return [...top, ...s.steps.flatMap((st, i) => problems({ ...st, name: s.name, surface: s.surface, steps: undefined }, { personas, readOnly, tools })
+    return [...top, ...s.steps.flatMap((st, i) => problems({ ...st, name: s.name, surface: s.surface, steps: undefined }, { personas, readOnly, tools, web })
       .map((m) => `step ${i + 1}${st?.name ? ` '${st.name}'` : ""}: ${m}`))];
   }
   const out = [], ro = new RegExp(readOnly);
@@ -88,6 +97,7 @@ export function problems(s, { personas = {}, readOnly = READ_ONLY, tools = [] } 
       const id = `${what}[${i}]${o?.name ? ` '${o.name}'` : ""}`;
       if (!o?.name) out.push(`${id}: name`);
       if (!o?.tool && !o?.cmd) out.push(`${id}: a tool to call or a cmd to run`);
+      if (o?.tool && web) out.push(`${id}: a web surface has no MCP tools to call: check with a cmd and a marker`);
       if (o?.tool && what !== "setup" && !ro.test(o.tool)) out.push(`${id}: '${o.tool}' is not a read-only tool, so checking would change what it checks`);
       if (o?.tool && tools.length && !tools.includes(o.tool)) out.push(`${id}: the target has no tool '${o.tool}'`);
       if (o?.tool && !known(o.as ?? "")) out.push(`${id}: 'as' must be a persona (${[...new Set([s?.persona?.id, ...Object.keys(personas)])].filter(Boolean).join(", ")})`);
@@ -139,6 +149,9 @@ export function target(cfg, env = process.env) {
   return { url, headersFor, call, tools };
 }
 
+/** A web surface: no MCP server of its own; the agent uses the browser of sims.agent.servers, oracles are commands. */
+export const webTarget = (url) => ({ url, web: true, headersFor: () => ({}), tools: async () => [], call: async () => ({ error: true, text: "a web surface has no MCP tools" }) });
+
 /**
  * A local door to the target for one persona: every request the agent makes goes out with that persona's credentials
  * (fresh ones each time, for servers whose credentials are single-use), and each tool it calls is written down.
@@ -170,7 +183,8 @@ export function agentEnv(env, allowApiKey = false) {
 
 /**
  * One agent run. `agent.cmd` (or SIM_AGENT_CMD) swaps Claude Code for any command, which gets SIM_PROXY_URL, SIM_TASK
- * and SIM_PERSONA: how this file is tested without a model, and how another harness can be plugged in.
+ * and SIM_PERSONA: how this file is tested without a model, and how another harness can be plugged in. SIM_AGENT_MODEL
+ * overrides agent.model (the soak's rounds run on a cheaper model than the deploy gate: traffic.mjs).
  */
 export function runAgent({ task, system, proxyUrl, persona, agent = {}, env = process.env }) {
   const timeoutMs = (agent.timeout_s ?? 300) * 1000, custom = env.SIM_AGENT_CMD ?? agent.cmd;
@@ -178,35 +192,44 @@ export function runAgent({ task, system, proxyUrl, persona, agent = {}, env = pr
   let cmd, args;
   if (custom) { cmd = "sh"; args = ["-c", custom]; }
   else {
-    writeFileSync(join(cwd, "mcp.json"), JSON.stringify({ mcpServers: { app: { type: "http", url: proxyUrl }, ...(agent.servers ?? {}) } }));
+    writeFileSync(join(cwd, "mcp.json"), JSON.stringify({ mcpServers: { ...(proxyUrl ? { app: { type: "http", url: proxyUrl } } : {}), ...(agent.servers ?? {}) } }));
     cmd = agent.bin ?? "claude";
     args = ["-p", task, "--restricted", "--strict-mcp-config", "--mcp-config", join(cwd, "mcp.json"), "--tools", "", "--disable-slash-commands",
-      "--no-session-persistence", "--system-prompt", system, "--allowedTools", ["mcp__app", ...Object.keys(agent.servers ?? {}).map((n) => `mcp__${n}`)].join(","),
-      "--output-format", "stream-json", "--verbose", ...(agent.model ? ["--model", agent.model] : [])];
+      "--no-session-persistence", "--system-prompt", system, "--allowedTools", [...(proxyUrl ? ["mcp__app"] : []), ...Object.keys(agent.servers ?? {}).map((n) => `mcp__${n}`)].join(","),
+      "--output-format", "stream-json", "--verbose", ...(env.SIM_AGENT_MODEL || agent.model ? ["--model", env.SIM_AGENT_MODEL || agent.model] : [])];
   }
   return new Promise((done) => {
-    const child = spawn(cmd, args, { cwd, env: { ...agentEnv(env, agent.allowApiKey), SIM_PROXY_URL: proxyUrl, SIM_TASK: task, SIM_PERSONA: persona }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd, env: { ...agentEnv(env, agent.allowApiKey), SIM_PROXY_URL: proxyUrl ?? "", SIM_TASK: task, SIM_PERSONA: persona }, stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "", timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
     child.stdout.on("data", (d) => { out += d; }); child.stderr.on("data", (d) => { err += d; });
     child.on("error", (e) => { clearTimeout(timer); done({ ok: false, why: `could not start the agent: ${e.message}`, source: custom ? "custom" : "unknown" }); });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (custom) return done({ ok: code === 0 && !timedOut, why: timedOut ? "timed out" : code ? `agent command exited ${code}: ${err.trim().split("\n").at(-1) ?? ""}` : "", source: "custom", said: out.trim().slice(-600) });
+      // The tools it used, from its events (a web surface's calls go to the browser, past the proxy).
       let init = null, result = null;
-      for (const line of out.split("\n")) { try { const e = JSON.parse(line); if (e.type === "system" && e.subtype === "init") init = e; if (e.type === "result") result = e; } catch { /* not an event */ } }
+      const used = [];
+      for (const line of out.split("\n")) {
+        try {
+          const e = JSON.parse(line);
+          if (e.type === "system" && e.subtype === "init") init = e;
+          if (e.type === "result") result = e;
+          if (e.type === "assistant") for (const c of e.message?.content ?? []) if (c?.type === "tool_use") used.push(String(c.name));
+        } catch { /* not an event */ }
+      }
+      if (custom) return done({ ok: code === 0 && !timedOut, why: timedOut ? "timed out" : code ? `agent command exited ${code}: ${err.trim().split("\n").at(-1) ?? ""}` : "", source: "custom", said: out.trim().slice(-600), used });
       const source = !init ? "unknown" : init.apiKeySource === "none" ? "subscription" : `api-key (${init.apiKeySource})`;
-      const mcp = (init?.mcp_servers ?? []).find((s) => s.name === "app");
+      const mcp = (init?.mcp_servers ?? []).find((s) => s.name === (proxyUrl ? "app" : Object.keys(agent.servers ?? {})[0]));
       const why = timedOut ? `timed out after ${timeoutMs / 1000} s` : !result ? `no result from the agent: ${(err || out).trim().split("\n").at(-1) ?? ""}`.slice(0, 300)
         : mcp && mcp.status !== "connected" ? `the agent could not connect to the target (${mcp.status})` : result.is_error ? `the agent ended in an error: ${String(result.result ?? result.subtype).slice(0, 200)}` : "";
-      done({ ok: !why, why, source, model: init?.model, turns: result?.num_turns, said: String(result?.result ?? "").slice(0, 600), costUsd: result?.total_cost_usd, ms: result?.duration_ms });
+      done({ ok: !why, why, source, model: init?.model, turns: result?.num_turns, said: String(result?.result ?? "").slice(0, 600), costUsd: result?.total_cost_usd, ms: result?.duration_ms, used });
     });
   });
 }
 
-const SYSTEM = (p) => `You are ${p.name ?? p.id}, ${p.about ?? p.role ?? "a person using this product"}.
-You are at work and have one thing to get done, given to you below in your own words. You have the product's tools and nothing else.
-Find out what the tools can do yourself; nobody will tell you which to use. Use only what the product tells you: do not invent facts.
+const SYSTEM = (p, web = false) => `You are ${p.name ?? p.id}, ${p.about ?? p.role ?? "a person using this product"}.
+You are at work and have one thing to get done, given to you below in your own words. ${web ? "You have a web browser and nothing else: the product is the site your task names." : "You have the product's tools and nothing else."}
+Find out what ${web ? "the site" : "the tools"} can do yourself; nobody will tell you ${web ? "where to click" : "which to use"}. Use only what the product tells you: do not invent facts.
 Do the work for real, then stop. When you are done, say in two lines what you did and anything that got in your way. If the product would not let you, say exactly what it answered.`;
 
 async function check(t, o, vars, env) {
@@ -228,7 +251,7 @@ const newRun = () => `${Date.now().toString(36)}${Math.floor(Math.random() * 129
  * earlier one wrote. The journey stops at the first step that fails; the steps after it are named as not run.
  */
 export async function runScenario(s, t, opts = {}) {
-  const vars = { run: newRun(), ...(s.vars ?? {}) };
+  const vars = { run: newRun(), ...deployUrls(opts.env), ...(s.vars ?? {}) };
   if (!Array.isArray(s.steps)) return runStep(s, t, opts, vars);
   const log = opts.log ?? (() => {});
   const rec = { name: s.name, surface: s.surface, persona: [...new Set(s.steps.map((x) => x.persona.id))].join("+"), run: vars.run, steps: [], oracles: [], failed: [], called: [], turns: 0, ms: 0, costUsd: 0 };
@@ -265,14 +288,17 @@ async function runStep(s, t, { personas = {}, agent = {}, env = process.env, log
   for (const o of s.forbidden ?? []) if ((await check(t, o, vars, env)).holds) fail(`forbidden '${o.name}' already holds before the agent acts`);
   if (rec.failed.length) return { ...rec, ok: false };
 
-  const persona = { ...(personas[s.persona.id] ?? {}), ...s.persona };
-  const p = await proxy(t, persona.id);
-  const a = await runAgent({ task: fill(s.task, vars), system: SYSTEM(persona), proxyUrl: p.url, persona: persona.id, agent: { ...agent, ...(s.agent ?? {}) }, env });
-  await p.close();
-  Object.assign(rec, { agent: a.source, model: a.model, turns: a.turns, ms: a.ms, costUsd: a.costUsd, called: p.called, calls: p.calls, said: a.said });
+  const persona = { ...(personas[s.persona.id] ?? {}), ...s.persona }, task = fill(s.task, vars);
+  const unset = /\{(DEPLOY_URL_[A-Z0-9_]+)\}/.exec(task)?.[1];
+  if (unset) { fail(`the task names {${unset}}, which is not set: run it as a gate (deploy.mjs gives each Worker's address) or set it`); return { ...rec, ok: false }; }
+  const p = t.web ? null : await proxy(t, persona.id);
+  const a = await runAgent({ task, system: SYSTEM(persona, t.web), proxyUrl: p?.url, persona: persona.id, agent: { ...agent, ...(s.agent ?? {}) }, env });
+  await p?.close();
+  const called = p ? p.called : a.used ?? [];
+  Object.assign(rec, { agent: a.source, model: a.model, turns: a.turns, ms: a.ms, costUsd: a.costUsd, called, calls: p ? p.calls : called.map((tool) => ({ tool, args: [] })), said: a.said });
   if (!a.ok) fail(a.why);
   if (a.source.startsWith("api-key") && !agent.allowApiKey) fail(`the agent ran on an ${a.source}, not the subscription login (sims.agent.allowApiKey permits it)`);
-  if (a.ok && !p.called.length && !s.allowNoCalls) fail("the agent called no tool: nothing was exercised");
+  if (a.ok && !called.length && !s.allowNoCalls) fail(`the agent called no tool${t.web ? " of its browser" : ""}: nothing was exercised`);
   for (const o of s.oracles ?? []) {
     const r = await check(t, o, vars, env);
     rec.oracles.push({ name: o.name, holds: r.holds });
@@ -295,6 +321,8 @@ export function load(dir) {
 function config(root, manifestPath) {
   const m = JSON.parse(readFileSync(manifestPath, "utf8")), c = m.sims;
   if (!c) { console.error("the manifest has no `sims`: add sims.dir and sims.target (see the skill's manifest example)"); process.exit(2); }
+  // A server whose command starts with ./ is the repo's own (its playwright's browser MCP): the agent runs elsewhere.
+  if (c.agent?.servers) c.agent.servers = Object.fromEntries(Object.entries(c.agent.servers).map(([k, v]) => [k, String(v?.command).startsWith("./") ? { ...v, command: resolve(root, v.command) } : v]));
   return { m, c, dir: resolve(root, c.dir ?? ".deploy/sims"), personas: c.personas ?? {}, readOnly: c.readOnly ?? READ_ONLY };
 }
 
@@ -304,12 +332,24 @@ async function main() {
   const manifestPath = resolve(arg("manifest", join(dirname(new URL(import.meta.url).pathname), "manifest.json")));
   const root = resolve(arg("root", join(dirname(manifestPath), "..")));
   const { c, dir, personas, readOnly } = config(root, manifestPath);
-  const env = { ...process.env };
+  const env = { ...process.env }, web = !c.target;
   const all = load(dir), only = arg("only");
+
+  if (cmd === "fabricate" && argv.includes("--from-spec")) {
+    // A vibestack project: each story of the spec is a simulated person, written by the project's own `spec train`
+    // (it knows the generated module that judges what the deployed Worker holds). Proved when `run` runs them.
+    const r = train(root);
+    process.stdout.write(r.out.endsWith("\n") || !r.out ? r.out : `${r.out}\n`);
+    if (!r.ok) { console.log("SIM_FABRICATE_FAIL the spec's stories could not be written as scenarios"); process.exit(1); }
+    const born = load(dir).filter((s) => s.story), unsound = born.filter((s) => problems(s, { personas, readOnly, web }).length);
+    for (const s of unsound) console.log(`unsound ${s.name}: ${problems(s, { personas, readOnly, web }).join("; ")}`);
+    console.log(`${unsound.length ? "SIM_FABRICATE_FAIL" : "SIM_FABRICATE_OK"} kept=${born.length - unsound.length} findings=0 thrown_away=${unsound.length} from=spec`);
+    process.exit(unsound.length ? 1 : 0);
+  }
 
   if (cmd === "validate") {
     let bad = 0;
-    for (const s of all) { const p = problems(s, { personas, readOnly }); if (p.length) { bad++; console.log(`FAIL ${s.name ?? s.file}\n     ${p.join("\n     ")}`); } else console.log(`ok   ${s.name} [${s.surface}] ${Array.isArray(s.steps) ? `journey of ${s.steps.length} steps` : `as ${s.persona.id}`}`); }
+    for (const s of all) { const p = problems(s, { personas, readOnly, web }); if (p.length) { bad++; console.log(`FAIL ${s.name ?? s.file}\n     ${p.join("\n     ")}`); } else console.log(`ok   ${s.name} [${s.surface}] ${Array.isArray(s.steps) ? `journey of ${s.steps.length} steps` : `as ${s.persona.id}`}`); }
     if (!all.length) { console.log(`SIM_VALIDATE_FAIL no scenarios in ${dir}`); process.exit(1); }
     if (bad) { console.log(`SIM_VALIDATE_FAIL ${bad} of ${all.length}`); process.exit(1); }
     console.log(`SIM_VALIDATE_OK sims=${all.length}`); return;
@@ -320,7 +360,13 @@ async function main() {
   if (where === "production" || (where && !allowed.includes(where))) { console.log(`SIM_FAIL sims do not run against ${where} (sims.envs: ${allowed.join(", ")})`); process.exit(1); }
   if (arg("target")) env.SIM_MCP_URL = arg("target");
   let t;
-  try { t = target(c.target ?? {}, env); } catch (e) { console.log(`SIM_FAIL target: ${e.message}`); process.exit(1); }
+  if (web) {
+    const url = arg("target") ?? Object.values(deployUrls(env))[0];
+    if (!url) { console.log("SIM_FAIL a web surface needs its address: DEPLOY_URL_<WORKER> (a gate gets one) or --target"); process.exit(1); }
+    if (!Object.keys(c.agent?.servers ?? {}).length) { console.log("SIM_FAIL a web surface (no sims.target) needs a browser in sims.agent.servers for the agent to use it"); process.exit(1); }
+    if (cmd === "fabricate") { console.log("SIM_FABRICATE_FAIL agent-written scenarios need an MCP target to read; a vibestack spec: --from-spec"); process.exit(1); }
+    t = webTarget(url);
+  } else try { t = target(c.target ?? {}, env); } catch (e) { console.log(`SIM_FAIL target: ${e.message}`); process.exit(1); }
   if (c.forbidTargets && new RegExp(c.forbidTargets).test(t.url)) { console.log(`SIM_FAIL ${new URL(t.url).host} is on the list sims must never touch (sims.forbidTargets)`); process.exit(1); }
   const world = (which) => {
     if (!c[which]) return true;
@@ -333,7 +379,7 @@ async function main() {
   try {
     const first = Object.keys(personas)[0] ?? all[0]?.persona?.id ?? all[0]?.steps?.[0]?.persona?.id;
     const tools = first ? (await t.tools(first)).map((x) => x.name) : [];
-    if (!tools.length) { console.log("SIM_FAIL the target lists no tools (address or credentials)"); code = 1; return; }
+    if (!tools.length && !web) { console.log("SIM_FAIL the target lists no tools (address or credentials)"); code = 1; return; }
 
     if (cmd === "fabricate") { code = await fabricate({ c, dir, personas, readOnly, t, tools: await t.tools(first), env, arg, existing: all }); return; }
     if (cmd !== "run") { console.error("usage: sim.mjs run | validate | fabricate"); code = 2; return; }
@@ -342,7 +388,7 @@ async function main() {
     if (!list.length) { console.log(`SIM_FAIL no scenario${only ? ` named ${only}` : `s in ${dir}`}`); code = 1; return; }
     const recs = [];
     for (const s of list) {
-      const p = problems(s, { personas, readOnly, tools });
+      const p = problems(s, { personas, readOnly, tools, web });
       if (p.length) { console.log(`FAIL ${s.name}: not a sound scenario\n     ${p.join("\n     ")}`); recs.push({ name: s.name, ok: false, failed: p }); continue; }
       console.log(`run  ${s.name} [${s.surface}] ${Array.isArray(s.steps) ? `journey of ${s.steps.length} steps` : `as ${s.persona.id}`}`);
       let r = await runScenario(s, t, { personas, agent: c.agent ?? {}, env, log: console.log });

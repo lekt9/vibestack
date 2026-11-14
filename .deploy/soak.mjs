@@ -132,7 +132,7 @@ try {
   else for (const l of lines) console.log(l);
   if (fails.length) { console.log(`SOAK_FAIL worker=${worker} version=${version} reasons=${fails.length}`); process.exit(1); }
   if (quiet) { console.log(`SOAK_EARLY worker=${worker} version=${version}: ${requests} requests ${span}; judged once there are ${minRequests} (nothing seen so far is wrong)`); process.exit(3); }
-  console.log(`SOAK_OK worker=${worker} version=${version} hours=${sinceDeploy ? ageH.toFixed(1) : hours} requests=${requests} failed=${bad}`);
+  console.log(`SOAK_OK worker=${worker} version=${version} hours=${sinceDeploy ? ageH.toFixed(1) : hours} requests=${requests} failed=${bad} source=analytics`);
 } catch (e) {
   console.error(`SOAK_UNKNOWN worker=${worker}: ${String(e?.message ?? e)}`);
   process.exit(2);

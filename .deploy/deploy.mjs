@@ -28,6 +28,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { vibestackCoverage } from "./vibestack.mjs";
 
 const ENVS = ["preview", "staging", "preprod", "production"];
 const NAME_MAX = 54;
@@ -96,6 +97,7 @@ export function previewConfig(base, worker, slug, siblings, strip = ["triggers",
 /** The three kinds of test every surface needs: on the code, on the deployed thing, and by a simulated person. */
 export const TEST_KINDS = ["unit", "e2e", "user"];
 const PRE_PRODUCTION = ["preview", "staging", "preprod"];
+const SOAK_ENVS = ["staging", "preprod"]; // (traffic.mjs keeps the same list)
 
 /** What a Worker's wrangler config says it has that can break on its own, as surface kinds. */
 export function detectSurfaces(cfg = {}) {
@@ -244,6 +246,10 @@ async function main() {
     const pre = runGates(m.before[env], { root, env, done: at, log, label: "before" });
     if (pre.failed) { console.log(`DEPLOY_FAIL env=${env} before=${JSON.stringify(pre.failed)} nothing was deployed`); process.exit(1); }
   }
+  // The simulated people of the soak stop while their environment is deployed again: a round must not meet a half-done
+  // deploy, and the new version gets its own window (started below once its gates pass).
+  const soaks = !dry && !slug && SOAK_ENVS.includes(env) && existsSync(trafficScript());
+  if (soaks) { const s = sh("node", [trafficScript(), "stop", env, "--root", root, "--manifest", manifestPath, "--why", `deploying ${env} again`], { cwd: root }); if (/TRAFFIC_STOPPED/.test(s.out)) log(s.out.trim()); }
   const before = new Map(); // Worker → the version it ran before this deploy (to roll back to)
   const again = []; // previews first deployed without their sibling bindings (a circle of bindings)
   for (const p of plan) {
@@ -316,7 +322,25 @@ async function main() {
   // The deploy is good. What follows it (after.<env>: telling the people who use the product what changed) never
   // takes it back: a note that did not go out is a FAIL line and `after=0/1`, and `deploy.mjs after <env>` sends it again.
   const told = dry || slug || !done.length ? null : runAfter(root, env, m, done, log);
-  console.log(`${dry ? "DEPLOY_DRY_OK" : "DEPLOY_OK"} env=${env}${slug ? ` branch=${slug}` : ""} workers=${done.map((d) => d.name).join(",")} gate=${passed}/${gates.length}${told ? ` after=${told.passed}/${told.of}` : ""}`);
+  // Then the simulated people start using it, every 25 minutes for the soak's hours (traffic.mjs): the soak judges what
+  // they met. Not an option: --no-traffic is for a deploy that must not be soaked (a test of the train itself).
+  const traffic = soaks && done.length && !flag("no-traffic") ? startTraffic(root, manifestPath, env, plan, done, m, log) : "";
+  console.log(`${dry ? "DEPLOY_DRY_OK" : "DEPLOY_OK"} env=${env}${slug ? ` branch=${slug}` : ""} workers=${done.map((d) => d.name).join(",")} gate=${passed}/${gates.length}${told ? ` after=${told.passed}/${told.of}` : ""}${traffic ? ` traffic=${traffic}` : ""}`);
+}
+
+function trafficScript() { return join(dirname(realpathSync(new URL(import.meta.url).pathname)), "traffic.mjs"); }
+
+/** Start the soak's simulated people on what was just deployed. Returns on, none, waived or failed. */
+function startTraffic(root, manifestPath, env, plan, done, m, log) {
+  const workers = plan.filter((p) => p.base && done.some((d) => d.key === p.w.name)).map((p) => {
+    const d = done.find((x) => x.key === p.w.name);
+    return { key: p.w.name, name: p.baseName, config: p.from.config, url: d.url || (m.subdomain ? `https://${p.baseName}.${m.subdomain}.workers.dev` : "") };
+  });
+  const r = sh("node", [trafficScript(), "start", env, "--root", root, "--manifest", manifestPath, "--workers", JSON.stringify(workers)], { cwd: root });
+  if (r.code === 4) return "none";
+  if (/TRAFFIC_NONE/.test(r.out)) return "waived";
+  log(r.out.trim().split("\n").at(-1));
+  return r.code === 0 && /TRAFFIC_ON/.test(r.out) ? "on" : "failed";
 }
 
 /**
@@ -442,9 +466,13 @@ function coverageOf(root, manifestPath) {
   const m = JSON.parse(readFileSync(manifestPath, "utf8")), dir = join(root, m.sims?.dir ?? ".deploy/sims");
   const sims = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => { try { return JSON.parse(readFileSync(join(dir, f), "utf8")); } catch { return { name: f, surface: "(unreadable)" }; } }) : [];
   const detected = (m.workers ?? []).flatMap((w) => { const c = w.envs?.production?.config ?? w.envs?.staging?.config; try { return detectSurfaces(parseJsonc(readFileSync(join(root, c), "utf8"))); } catch { return []; } });
-  return coverage(m, { sims, detected });
+  const c = coverage(m, { sims, detected }), v = vibestackCoverage(root, m, sims);
+  // A vibestack project: its spec says what else must be covered (a simulated person per story, the rules proved by a
+  // check, conformance walked on the deployed Worker, review read before a release: vibestack.mjs).
+  if (v) { c.bad.push(...v.bad); c.lines.push(...v.lines); Object.assign(c.counts, v.counts); c.ok = !c.bad.length; }
+  return c;
 }
-function coverageMarker(c) { return `COVERAGE_OK surfaces=${c.counts.surfaces} unit=${c.counts.unit} e2e=${c.counts.e2e} user=${c.counts.user} waived=${c.counts.waived}`; }
+function coverageMarker(c) { return `COVERAGE_OK surfaces=${c.counts.surfaces} unit=${c.counts.unit} e2e=${c.counts.e2e} user=${c.counts.user} waived=${c.counts.waived}${"stories" in c.counts ? ` stories=${c.counts.stories} rules=${c.counts.rules}` : ""}`; }
 
 /** Put each Worker back on the version it ran before. Returns how many went back. */
 function rollback(before, root, log, why = "gate failed after deploy") {
@@ -532,21 +560,44 @@ function checks(root, manifestPath) {
   console.log(`CHECKS_OK ${ran.length + extra}/${ran.length + extra}`);
 }
 
-/** The soak verdict (soak.mjs) for every Worker of an environment, with the manifest's thresholds. SOAK_ALL_OK when all pass. */
+/**
+ * The soak verdict for every Worker of an environment, with the manifest's thresholds. Two sources, each read when it
+ * can be: Cloudflare's analytics (soak.mjs, needs CLOUDFLARE_API_TOKEN and the account) and what the simulated people
+ * met across the window (traffic.mjs judge, needs only wrangler's login). Without a token the simulated people alone
+ * decide, and the marker says so: SOAK_ALL_OK env=… source=sims. With one, both must pass (source=analytics+sims).
+ */
 function soak(root, manifestPath, env) {
-  const m = JSON.parse(readFileSync(manifestPath, "utf8")), o = m.soak ?? {}, bad = [];
-  const script = join(dirname(new URL(import.meta.url).pathname), "soak.mjs");
-  for (const w of m.workers ?? []) {
-    const cfg = w.envs?.[env]?.config;
-    if (!cfg) continue;
-    const name = parseJsonc(readFileSync(join(root, cfg), "utf8")).name, per = { ...o, ...(w.soak ?? {}) };
-    const args = [script, "--worker", name, "--hours", String(arg("hours", per.hours ?? 6)), "--min-requests", String(per.minRequests ?? 50), "--max-error-rate", String(per.maxErrorRate ?? 0.01)];
-    if (per.probe?.[env]) args.push("--probe", per.probe[env]);
-    if (m.account) args.push("--account", m.account);
-    const r = sh("node", args, { cwd: root });
-    process.stdout.write(r.out);
-    if (r.code) bad.push(name);
+  const m = JSON.parse(readFileSync(manifestPath, "utf8")), o = m.soak ?? {}, bad = [], sources = [];
+  const here = dirname(realpathSync(new URL(import.meta.url).pathname)), script = join(here, "soak.mjs");
+  const token = process.env.CLOUDFLARE_API_TOKEN && (process.env.CLOUDFLARE_ACCOUNT_ID || m.account);
+  if (token) {
+    sources.push("analytics");
+    for (const w of m.workers ?? []) {
+      const cfg = w.envs?.[env]?.config;
+      if (!cfg) continue;
+      const name = parseJsonc(readFileSync(join(root, cfg), "utf8")).name, per = { ...o, ...(w.soak ?? {}) };
+      const args = [script, "--worker", name, "--hours", String(arg("hours", per.hours ?? 6)), "--min-requests", String(per.minRequests ?? 50), "--max-error-rate", String(per.maxErrorRate ?? 0.01)];
+      if (per.probe?.[env]) args.push("--probe", per.probe[env]);
+      if (m.account) args.push("--account", m.account);
+      const r = sh("node", args, { cwd: root });
+      process.stdout.write(r.out);
+      if (r.code) bad.push(name);
+    }
   }
-  if (bad.length) { console.log(`SOAK_ALL_FAIL env=${env} not_ready=${bad.join(",")}`); process.exit(1); }
-  console.log(`SOAK_ALL_OK env=${env}`);
+  const t = existsSync(trafficScript()) ? sh("node", [trafficScript(), "judge", env, "--root", root, "--manifest", manifestPath, ...(arg("hours") ? ["--hours", arg("hours")] : [])], { cwd: root })
+    : { code: 4, out: "TRAFFIC_NONE traffic.mjs is not beside deploy.mjs\n" };
+  if (t.code === 4) {
+    const why = t.out.trim().split("\n").at(-1).replace(/^TRAFFIC_NONE (env=\S+: )?/, "");
+    if (!token) { console.log(`FAIL nothing to judge ${env} by: no CLOUDFLARE_API_TOKEN for Cloudflare's analytics, and no simulated people (${why})`); bad.push("all"); }
+    else console.log(`     no simulated people on ${env}: ${why}`);
+  } else {
+    sources.push("sims");
+    process.stdout.write(t.out);
+    if (!token) console.log(`     judged from what the simulated people met and wrangler tail saw (no CLOUDFLARE_API_TOKEN, so not from Cloudflare's analytics)`);
+    const named = [...t.out.matchAll(/^SOAK_(?:FAIL|UNKNOWN) worker=(\S+)/gm)].map((x) => x[1]);
+    if (t.code) for (const n of named.length ? named : ["sims"]) if (!bad.includes(n)) bad.push(n);
+  }
+  const source = sources.join("+") || "none";
+  if (bad.length) { console.log(`SOAK_ALL_FAIL env=${env} not_ready=${bad.join(",")} source=${source}`); process.exit(1); }
+  console.log(`SOAK_ALL_OK env=${env} source=${source}`);
 }

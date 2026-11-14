@@ -86,7 +86,7 @@ would call true or false.
 | Tests | Whole journeys in Vitest with `@effect/vitest` and Playwright, citing the rule each step serves; conformance runs of the real app against the spec | `tests`, `traces` |
 | Workspace | Node 26, pnpm workspaces, Turborepo; ESLint boundaries, Knip and Madge | `pnpm verify`, CI on every push |
 | Runtime | Cloudflare Workers: a Durable Object per machine, D1 and KV stores, the page as static assets, from `vibestack/cloudflare` | `traces` and journeys on the Worker under `wrangler dev`, then again on each deploy |
-| Delivery | The cf-release-train in `.deploy/`: a preview per branch, staging, preprod and production; `pnpm check` and `pnpm verify` before a deploy, conformance and journeys on the deployed Worker after it with rollback, a simulated person per story (`spec train`), a 6-hour soak before production | `node .deploy/deploy.mjs coverage` and `checks`; [shell skill, "On Cloudflare Workers"](.claude/skills/shell/SKILL.md#on-cloudflare-workers) |
+| Delivery | The cf-release-train in `.deploy/`: a preview per branch, staging, preprod and production; `spec check` (every rule proved) and `pnpm verify` before a deploy, conformance, journeys and a simulated person per story (`spec train`) on the deployed Worker after it with rollback, review signed off before preprod and production, a 6-hour soak before production | `node .deploy/deploy.mjs coverage` and `checks`; [shell skill, "On Cloudflare Workers"](.claude/skills/shell/SKILL.md#on-cloudflare-workers) |
 
 ```mermaid
 flowchart LR

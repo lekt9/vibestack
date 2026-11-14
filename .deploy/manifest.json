@@ -1,4 +1,5 @@
 {
+  "subdomain": "lewis-6d8",
   "branches": {
     "staging": "staging",
     "release": "release/",
@@ -29,9 +30,9 @@
   "checks": [
     {
       "layer": "unit",
-      "name": "pnpm check: the spec's model, rules, proofs, generated code, types, tests and conformance on the local Worker",
-      "cmd": "pnpm check",
-      "marker": "next: all green",
+      "name": "the spec: every stage of spec check, no rule unproved (review waits only for a release)",
+      "cmd": "node .deploy/vibestack.mjs check",
+      "marker": "VIBESTACK_OK",
       "timeout_s": 3600
     },
     {
@@ -43,7 +44,7 @@
     {
       "layer": "unit",
       "name": "every story is a simulated person",
-      "cmd": "node vibestack/spec.ts train --check",
+      "cmd": "node .deploy/vibestack.mjs train --check",
       "marker": "TRAIN_OK"
     },
     {
@@ -53,12 +54,30 @@
       "marker": "SIM_VALIDATE_OK"
     }
   ],
+  "before": {
+    "preprod": [
+      {
+        "name": "the spec is signed off and every rule proved",
+        "cmd": "node .deploy/vibestack.mjs check",
+        "marker": "VIBESTACK_OK",
+        "timeout_s": 3600
+      }
+    ],
+    "production": [
+      {
+        "name": "the spec is signed off and every rule proved",
+        "cmd": "node .deploy/vibestack.mjs check",
+        "marker": "VIBESTACK_OK",
+        "timeout_s": 3600
+      }
+    ]
+  },
   "gates": {
     "preview": [
       {
         "name": "conformance on the deployed Worker",
-        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
-        "marker": "next: all green",
+        "cmd": "node .deploy/vibestack.mjs check --worker app",
+        "marker": "VIBESTACK_OK",
         "timeout_s": 3600
       },
       {
@@ -68,31 +87,44 @@
       {
         "name": "simulated people",
         "cmd": "node .deploy/sim.mjs run --env preview",
-        "marker": "SIM_OK"
+        "marker": "SIM_OK",
+        "timeout_s": 1800
       }
     ],
     "staging": [
       {
         "name": "conformance on the deployed Worker",
-        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
-        "marker": "next: all green",
+        "cmd": "node .deploy/vibestack.mjs check --worker app",
+        "marker": "VIBESTACK_OK",
         "timeout_s": 3600
       },
       {
         "name": "journeys on the deployed Worker",
         "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm -C apps/app exec vitest run test/app.test.vibe"
+      },
+      {
+        "name": "simulated people",
+        "cmd": "node .deploy/sim.mjs run --env staging",
+        "marker": "SIM_OK",
+        "timeout_s": 1800
       }
     ],
     "preprod": [
       {
         "name": "conformance on the deployed Worker",
-        "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm check",
-        "marker": "next: all green",
+        "cmd": "node .deploy/vibestack.mjs check --worker app",
+        "marker": "VIBESTACK_OK",
         "timeout_s": 3600
       },
       {
         "name": "journeys on the deployed Worker",
         "cmd": "DEPLOY_URL=\"$DEPLOY_URL_APP\" pnpm -C apps/app exec vitest run test/app.test.vibe"
+      },
+      {
+        "name": "simulated people",
+        "cmd": "node .deploy/sim.mjs run --env preprod",
+        "marker": "SIM_OK",
+        "timeout_s": 1800
       }
     ],
     "production": [
@@ -129,7 +161,7 @@
       "spec": "spec/app/index.md",
       "worker": "app",
       "unit": [
-        "pnpm check: the spec's model, rules, proofs, generated code, types, tests and conformance on the local Worker",
+        "the spec: every stage of spec check, no rule unproved (review waits only for a release)",
         "pnpm verify: build, types, tests, browser tests, lint, Knip, Madge and the selftest of every package"
       ],
       "e2e": [
@@ -151,12 +183,13 @@
     "agent": {
       "servers": {
         "browser": {
-          "command": "npx",
+          "command": "./node_modules/.bin/playwright",
           "args": [
-            "--yes",
-            "@playwright/mcp@latest",
+            "mcp",
             "--headless",
-            "--isolated"
+            "--isolated",
+            "--browser",
+            "chromium"
           ]
         }
       }

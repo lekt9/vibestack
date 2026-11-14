@@ -134,16 +134,22 @@ services do not change, so `gen/`'s machine and the spec stay the one model.
   (or `persist` to start it again over the same one), or the deployed Worker
   at `DEPLOY_URL` when a gate runs them. The conformance driver sends each
   reset to keys no earlier run used, so it needs no reset endpoint.
-- **The release train.** `.deploy/manifest.json` lists the checks (`pnpm
-  check`, `pnpm verify`, `spec train --check`, `sim.mjs validate`), the gates
-  on the deployed Worker (conformance and journeys with `DEPLOY_URL`, and the
-  simulated people on a preview), and a surface per Worker with the spec it
-  serves (`"spec"`, `"worker"`). `spec train` writes a simulated person per
-  story of that spec to `.deploy/sims/`, judged by `spec observe <module>
-  <url> --run <id>` (false before the person acts, true once the deployed
-  state has changed into one the spec allows); `pnpm new` runs it. The
-  scripts in `.deploy/*.mjs` are the cf-release-train skill's, copied whole:
-  never edit them here.
+- **The release train.** `.deploy/manifest.json` lists the checks
+  (`vibestack.mjs check`: every stage of `spec check`, no rule recorded as
+  unproved, and review waiting on `pnpm accept` allowed; then `pnpm verify`,
+  `vibestack.mjs train --check`, `sim.mjs validate`), the gates on the
+  deployed Worker in preview, staging and preprod (`vibestack.mjs check
+  --worker app`: conformance walked on the deployed Worker; the journeys with
+  `DEPLOY_URL`; the simulated people in a browser), `before.preprod` and
+  `before.production` (the same check, where pending review fails and nothing
+  deploys), and a surface per Worker with the spec it serves (`"spec"`,
+  `"worker"`). `spec train` writes a simulated person per story of that spec
+  to `.deploy/sims/`, judged by `spec observe <module> <url> --run <id>`
+  (false before the person acts, true once the deployed state has changed
+  into one the spec allows); `pnpm new` runs it, and `deploy.mjs coverage`
+  fails on a story with none. The scripts in `.deploy/*.mjs` are the
+  cf-release-train skill's (it reads this spec through `vibestack.mjs`),
+  copied whole: never edit them here.
 
 ## Building, running and testing
 

@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Every script the train is made of. They are copied whole and never edited in a repo: they call each other.
 export const SCRIPTS = ["deploy.mjs", "soak.mjs", "release.mjs", "ledger.mjs", "pr-rules.mjs", "line-coverage.mjs", "flake.mjs", "migration.mjs", "signoff.mjs", "review.mjs", "fix.mjs", "workflow-lint.mjs", "doctor.mjs",
-  "mcp-audit.mjs", "mcp-compat.mjs", "mcp-coverage.mjs", "http-smoke.mjs", "sim.mjs", "connections.mjs", "changelog.mjs"];
+  "mcp-audit.mjs", "mcp-compat.mjs", "mcp-coverage.mjs", "http-smoke.mjs", "sim.mjs", "connections.mjs", "changelog.mjs", "traffic.mjs", "vibestack.mjs"];
 export const WORKFLOWS = ["ci.yml", "deploy.yml", "promote.yml", "main-source-guard.yml", "preview-cleanup.yml", "watch.yml", "autofix.yml"];
 const IGNORES = [".wrangler.preview.*", ".deploy/.*"];
 const ENVS = ["preview", "staging", "preprod", "production"];
