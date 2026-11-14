@@ -1,0 +1,130 @@
+# The release train. Every 30 minutes: has the version on staging been live for the soak time (6 hours unless the
+# manifest says otherwise) with real use and no trouble (.deploy/soak.mjs: uptime, error rate, platform limits, Durable
+# Object resets), and is it not released yet? Then it is cut as release/X.Y (the changes' titles decide the number),
+# deployed to preprod and gated there, and signed off on evidence (.deploy/signoff.mjs: preprod's gates passed on exactly
+# this code, its bundle is written down, it has notes, nothing blocks it). Then:
+#   repository variable AUTO_PROMOTE = true  -> recorded on main as one tagged commit; the tag deploys production
+#   otherwise                                -> a pull request release/X.Y -> main is opened for a person to ship
+# A manifest with "signoff": { "person": true } stops here until a person who wrote none of it signs
+# (`node .deploy/signoff.mjs --notes notes.md --by <name> --evidence "<what they tried>"`). A release that stopped at its
+# sign-off, for that or any other reason, is not cut twice: once it is signed or put right, run this workflow by hand
+# with `ship` set to its branch (release/X.Y) and the last job runs again for it.
+# Needs the secret RELEASE_TOKEN (may push main and tags) for AUTO_PROMOTE. Nothing here skips a gate.
+name: promote
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      ship: { description: "a release branch that was cut and gated but not shipped (release/X.Y): run its sign-off and ship it", type: string, default: "" }
+permissions: {}
+defaults:
+  run:
+    shell: bash # (with pipefail: a step that pipes into tee fails when the command does)
+concurrency:
+  group: promote
+  cancel-in-progress: false
+jobs:
+  soak:
+    if: inputs.ship == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.s.outputs.sha }}
+      go: ${{ steps.s.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: staging, fetch-depth: 0 }
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: s
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD); echo "sha=$sha" >> "$GITHUB_OUTPUT"; echo "go=false" >> "$GITHUB_OUTPUT"
+          if node .deploy/release.mjs released "$sha"; then echo "already released"; exit 0; fi
+          # What soaked must be this commit: its own deploy run finished well.
+          ok=$(gh run list --workflow deploy.yml --branch staging --limit 1 --json conclusion,headSha -q '.[0] | select(.conclusion=="success") | .headSha')
+          if [ "$ok" != "$sha" ]; then echo "staging's last deploy is not a success for $sha"; exit 0; fi
+          if node .deploy/deploy.mjs soak staging; then echo "go=true" >> "$GITHUB_OUTPUT"; fi
+  cut:
+    needs: soak
+    if: needs.soak.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      branch: ${{ steps.c.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: staging, fetch-depth: 0 }
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: c
+        env:
+          SHA: ${{ needs.soak.outputs.sha }}
+        run: |
+          out=$(node .deploy/release.mjs cut "$SHA"); echo "$out"
+          echo "branch=$(echo "$out" | awk '/^RELEASE_CUT/ {print $2}')" >> "$GITHUB_OUTPUT"
+  preprod:
+    needs: cut
+    permissions:
+      contents: write
+      pull-requests: write
+      deployments: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: preprod
+      ref: ${{ needs.cut.outputs.branch }}
+    secrets: inherit
+  ship:
+    needs: [cut, preprod]
+    # After a cut that passed preprod; or by hand, for a release that stopped at its sign-off.
+    if: always() && ((needs.cut.result == 'success' && needs.preprod.result == 'success') || (inputs.ship != '' && startsWith(inputs.ship, 'release/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      deployments: write
+      issues: read
+    env:
+      BRANCH: ${{ inputs.ship || needs.cut.outputs.branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.ship || needs.cut.outputs.branch }}", fetch-depth: 0, token: "${{ secrets.RELEASE_TOKEN || github.token }}" }
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: what this release changes
+        run: node .deploy/release.mjs notes pending --out notes.md && cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: sign the release candidate off, on evidence
+        run: node .deploy/signoff.mjs --notes notes.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: record the release on main and tag it (the tag deploys production)
+        if: vars.AUTO_PROMOTE == 'true'
+        run: |
+          git config user.name "release-train"; git config user.email "release-train@users.noreply.github.com"
+          node .deploy/release.mjs record "$BRANCH"
+      - name: or ask a person to ship it
+        if: vars.AUTO_PROMOTE != 'true'
+        run: |
+          gh pr create --base main --head "$BRANCH" --title "release $BRANCH" --body "$(printf 'Soaked on staging, passed the preprod gate and was signed off on evidence. Squash merge, then tag it to deploy production.\n\n%s' "$(cat notes.md)")"

@@ -1,0 +1,124 @@
+# When ci fails on a pull request, propose the fix (.deploy/fix.mjs). Off until the repository variable AUTO_FIX is
+# "true". What it may and may not do is in fix.mjs and is enforced there, not here:
+#   - the fix is its own branch (autofix/…) and its own pull request into the branch that failed; nothing is merged;
+#   - a change that weakens a test, a baseline, a snapshot, the manifest or a workflow is thrown away;
+#   - a failure of the machine (memory, disk, network) is not "fixed"; at most three proposals per branch, never two for
+#     the same failure, never a fix of a fix.
+# It runs only for branches of this repository, never for a fork's and never for a bot's change.
+#
+# Two jobs, because the first one runs the branch's own code (its install scripts and its failing check):
+#   propose  may read the repository and nothing else. It makes the fix as a patch and hands it on. The one credential it
+#            holds is the agent's login, given to the fixing step alone; fix.mjs runs the check without any credential.
+#   open     may push a branch and open a pull request, and runs no code from the branch: it applies the patch and
+#            pushes it. AUTOFIX_TOKEN (a token that may push branches and open pull requests, nothing more) makes the
+#            proposed fix's own checks start; with the workflow's own token the pull request is opened but ci does not
+#            run on it until someone pushes to it.
+name: autofix
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+permissions: {}
+defaults:
+  run:
+    shell: bash # (with pipefail: a step that pipes into tee fails when the command does)
+concurrency:
+  group: autofix-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+jobs:
+  propose:
+    if: >-
+      vars.AUTO_FIX == 'true' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && !startsWith(github.event.workflow_run.head_branch, 'autofix/') && github.event.workflow_run.actor.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      proposed: ${{ steps.fix.outputs.proposed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: submodules (a read-only deploy key or a token, for a private one)
+        env:
+          SUBMODULE_SSH_KEY: ${{ secrets.SUBMODULE_SSH_KEY }}
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+        run: |
+          [ -f .gitmodules ] || exit 0
+          if [ -n "$SUBMODULE_SSH_KEY" ]; then
+            mkdir -p ~/.ssh && (umask 077 && printf '%s\n' "$SUBMODULE_SSH_KEY" > ~/.ssh/submodule)
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/submodule -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            git config --global url."git@github.com:".insteadOf "https://github.com/"
+          elif [ -n "$SUBMODULE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+          git submodule update --init --recursive
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          [ -z "$SUBMODULE_TOKEN" ] || git config --global --unset-all url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf || true
+          rm -f ~/.ssh/submodule
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile; elif [ -f pnpm-lock.yaml ] && [ ! -d node_modules ]; then corepack enable && pnpm install --frozen-lockfile; fi
+          npm install -g @anthropic-ai/claude-code
+      - name: make a fix for the first failing check (its log is kept outside the checkout, which the fixer needs clean)
+        id: fix
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          code=0; node .deploy/fix.mjs --from-checks --describe "$RUNNER_TEMP/fix.json" | tee "$RUNNER_TEMP/fix.log" || code=$?
+          tail -1 "$RUNNER_TEMP/fix.log" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -eq 0 ] && [ -f "$RUNNER_TEMP/fix.json" ]; then
+            branch=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).branch)' "$RUNNER_TEMP/fix.json")
+            git format-patch -1 --stdout "$branch" > "$RUNNER_TEMP/fix.patch"
+            echo "proposed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # 3: not the code's fault or not the fixer's to fix. That is an answer, not a failed job.
+          [ "$code" -eq 0 ] || [ "$code" -eq 3 ]
+      - uses: actions/upload-artifact@v4
+        if: steps.fix.outputs.proposed == 'true'
+        with:
+          name: proposed-fix
+          path: |
+            ${{ runner.temp }}/fix.json
+            ${{ runner.temp }}/fix.patch
+          retention-days: 3
+  open:
+    needs: propose
+    if: needs.propose.outputs.proposed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with: { name: proposed-fix, path: "${{ runner.temp }}/fix" }
+      - name: apply the patch and open the pull request (nothing from the branch is run here)
+        env:
+          FIX: ${{ runner.temp }}/fix
+        run: |
+          read_field() { node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]])' "$FIX/fix.json" "$1"; }
+          branch=$(read_field branch); base=$(read_field base)
+          case "$branch" in autofix/*) ;; *) echo "not a fix branch: $branch"; exit 1 ;; esac
+          git switch -c "$branch"
+          git -c user.name=release-train -c user.email=release-train@users.noreply.github.com am "$FIX/fix.patch"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          read_field body > "$FIX/body.md"
+          gh pr create --base "$base" --head "$branch" --title "$(read_field title)" --body-file "$FIX/body.md"

@@ -1,0 +1,149 @@
+# One deploy workflow for every branch, like Vercel: the ref decides the environment (.deploy/deploy.mjs env-for).
+#   any other branch -> preview (a deployment of its own)     staging -> staging
+#   release/*        -> preprod                               tag vX.Y.Z -> production
+# Each environment is a GitHub Environment of the same name with its own secrets:
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, GATE_ENV (KEY=VALUE lines the gates need), WORKER_SECRETS (preview only:
+#   one JSON object of the secrets a brand-new Worker needs).
+# The gate runs on the deployed thing; a failed gate rolls the deploy back and fails the run. Every deploy, pass or fail,
+# goes on the ledger (a GitHub deployment). Preprod writes down the bundle it tested and production refuses to ship any
+# other; a production deploy publishes the release with its notes.
+name: deploy
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  workflow_call:
+    inputs:
+      environment: { required: true, type: string }
+      ref: { required: true, type: string }
+concurrency:
+  group: deploy-${{ inputs.environment || github.ref }}
+  cancel-in-progress: false
+permissions: {}
+defaults:
+  run:
+    shell: bash # (with pipefail: a step that pipes into tee fails when the command does)
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      env: ${{ steps.r.outputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: r
+        run: echo "env=${WANT:-$(node .deploy/deploy.mjs env-for --ref "$GITHUB_REF")}" >> "$GITHUB_OUTPUT"
+        env:
+          WANT: ${{ inputs.environment }}
+  deploy:
+    needs: route
+    if: needs.route.outputs.env != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # (the checks run first, and a test run that fails is repeated to tell a flaky test from a broken one)
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: write
+    environment: ${{ needs.route.outputs.env }}
+    env:
+      DEPLOY_ENV: ${{ needs.route.outputs.env }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_SECRETS: ${{ secrets.WORKER_SECRETS }}
+      # Simulated people (sim.mjs) run on headless Claude Code with a subscription token (`claude setup-token`), never an
+      # API key: sim.mjs takes API keys out of the agent's environment and fails a run that used one.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.ref || github.ref }}", fetch-depth: 0 }
+      - name: submodules (a read-only deploy key or a token, for a private one)
+        env:
+          SUBMODULE_SSH_KEY: ${{ secrets.SUBMODULE_SSH_KEY }}
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+        run: |
+          [ -f .gitmodules ] || exit 0
+          if [ -n "$SUBMODULE_SSH_KEY" ]; then
+            mkdir -p ~/.ssh && (umask 077 && printf '%s\n' "$SUBMODULE_SSH_KEY" > ~/.ssh/submodule)
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/submodule -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            git config --global url."git@github.com:".insteadOf "https://github.com/"
+          elif [ -n "$SUBMODULE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+          git submodule update --init --recursive
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          [ -z "$SUBMODULE_TOKEN" ] || git config --global --unset-all url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf || true
+          rm -f ~/.ssh/submodule
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile; elif [ -f pnpm-lock.yaml ] && [ ! -d node_modules ]; then corepack enable && pnpm install --frozen-lockfile; fi
+      - name: the agent that plays the simulated people (only when the manifest has sims)
+        run: |
+          if node -e 'process.exit(require("./.deploy/manifest.json").sims ? 0 : 1)'; then npm install -g @anthropic-ai/claude-code; fi
+      - name: what the gates need
+        run: printf '%s\n' "$GATE_ENV" >> "$GITHUB_ENV"
+        env:
+          GATE_ENV: ${{ secrets.GATE_ENV }}
+      - name: checks (nothing is deployed that fails them)
+        run: node .deploy/deploy.mjs checks
+      - name: the bundle (the last environment before production writes down what it tests; production ships that or nothing)
+        if: env.DEPLOY_ENV != 'preview'
+        run: node .deploy/ledger.mjs artifact --env "$DEPLOY_ENV" --auto
+      - name: deploy, gate, roll back on a failed gate
+        id: d
+        run: |
+          node .deploy/deploy.mjs "$DEPLOY_ENV" --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tee deploy.log
+          grep -q '^DEPLOY_OK' deploy.log
+      - name: say where the preview is
+        if: env.DEPLOY_ENV == 'preview'
+        continue-on-error: true
+        run: |
+          pr=$(gh pr list --head "$GITHUB_REF_NAME" --json number -q '.[0].number')
+          [ -n "$pr" ] || exit 0
+          body=$(printf '<!-- release-train:preview -->\nPreview of `%s`:\n\n%s' "${GITHUB_SHA:0:7}" "$(grep -o 'https://[^ ]*workers.dev[^ ]*' deploy.log | sort -u | sed 's/^/- /')")
+          # One comment of its own, found by its marker: `--edit-last` would overwrite whichever comment this identity wrote last.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate --jq '[.[] | select(.body | startswith("<!-- release-train:preview -->"))][0].id // empty' | head -1)
+          if [ -n "$id" ]; then gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null; else gh pr comment "$pr" --body "$body"; fi
+  release:
+    # Publishing is the one step that writes to the repository, so it is a job of its own: no deploy holds that right.
+    needs: [route, deploy]
+    if: needs.route.outputs.env == 'production' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: publish the release with its notes
+        run: |
+          # A release the train recorded has notes from its changes' titles; one tagged by hand gets GitHub's own.
+          if node .deploy/release.mjs notes "$GITHUB_REF_NAME" --out "$RUNNER_TEMP/notes.md"; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

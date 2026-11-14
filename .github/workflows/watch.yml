@@ -1,0 +1,155 @@
+# What a gate cannot see at deploy time, looked at on a schedule:
+#   every 30 minutes  production's watch (.deploy/manifest.json `watch.production`: failures since the deploy against the
+#                     hours before it, the error budget, connections that died at their next renewal). A failed watch
+#                     rolls production back to the version before the deploy. Then drift: every Worker of production and
+#                     staging runs the version the last recorded deploy left there, or someone deployed by hand.
+#   Mondays 03:17 UTC the rollback drill on staging: back to the version before, gated there, forward again. It restarts
+#                     staging's soak clock, which is why it has a fixed hour.
+# A failure opens one issue labelled release-train (and adds to it while it stays open) so that it reaches a person.
+name: watch
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      drill: { description: "run the rollback drill on staging now", type: boolean, default: false }
+permissions: {}
+defaults:
+  run:
+    shell: bash # (with pipefail: a step that pipes into tee fails when the command does)
+concurrency:
+  group: watch
+  cancel-in-progress: false
+jobs:
+  production:
+    if: github.event.schedule != '17 3 * * 1' && !inputs.drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      deployments: write
+      issues: write
+      actions: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - name: submodules (a read-only deploy key or a token, for a private one)
+        env:
+          SUBMODULE_SSH_KEY: ${{ secrets.SUBMODULE_SSH_KEY }}
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+        run: |
+          [ -f .gitmodules ] || exit 0
+          if [ -n "$SUBMODULE_SSH_KEY" ]; then
+            mkdir -p ~/.ssh && (umask 077 && printf '%s\n' "$SUBMODULE_SSH_KEY" > ~/.ssh/submodule)
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/submodule -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            git config --global url."git@github.com:".insteadOf "https://github.com/"
+          elif [ -n "$SUBMODULE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+          git submodule update --init --recursive
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          [ -z "$SUBMODULE_TOKEN" ] || git config --global --unset-all url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf || true
+          rm -f ~/.ssh/submodule
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: "[ -x node_modules/.bin/wrangler ] || npm ci --ignore-scripts || npm i --no-save wrangler"
+      - name: what the watch needs
+        run: printf '%s\n' "$GATE_ENV" >> "$GITHUB_ENV"
+        env:
+          GATE_ENV: ${{ secrets.GATE_ENV }}
+      - name: watch production; roll back when it fails
+        run: |
+          code=0; node .deploy/deploy.mjs watch production --rollback | tee watch.log || code=$?
+          # 3: too soon after a deploy, or too little use since it, to judge. Neither a pass nor a failure, and nothing
+          # is rolled back. (2, "could not ask Cloudflare", rolls nothing back either, but fails this job so a person hears.)
+          [ "$code" -eq 0 ] || [ "$code" -eq 3 ]
+      - name: nothing was deployed by hand
+        run: |
+          # A deploy writes its ledger record after its gates: while one is running, the live version is ahead of the
+          # ledger and that is not drift. Look again on the next run.
+          # (Only deploys to staging, a release branch or a tag count: a branch's preview changes neither environment.)
+          busy=$(gh run list --workflow deploy.yml --json status,headBranch -q '[.[] | select((.status == "in_progress" or .status == "queued") and (.headBranch == "staging" or (.headBranch | startswith("release/")) or (.headBranch | test("^v[0-9]"))))] | length')
+          if [ "$busy" != "0" ]; then echo "a deploy is running: drift is judged on the next run" | tee -a watch.log; exit 0; fi
+          # (--adopt: an environment with nothing on the ledger yet starts from what is live, once; it changes nothing after.)
+          node .deploy/ledger.mjs drift --env production --adopt | tee -a watch.log
+          node .deploy/ledger.mjs drift --env staging --adopt | tee -a watch.log
+      - name: the numbers
+        if: always()
+        continue-on-error: true
+        run: node .deploy/ledger.mjs stats --env production | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: tell a person
+        if: failure()
+        continue-on-error: true
+        run: |
+          body=$(printf 'The scheduled watch failed at %s.\n\n```\n%s\n```\n\nRun: %s/%s/actions/runs/%s' "$(date -u +%FT%TZ)" "$(grep -E '^(FAIL|WATCH_|DRIFT_|rolled back|ROLLBACK)' watch.log | tail -25)" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          open=$(gh issue list --label release-train --state open --json number -q '.[0].number')
+          if [ -n "$open" ]; then gh issue comment "$open" --body "$body"; else gh issue create --title "release train: the production watch failed" --label release-train --body "$body" || gh issue create --title "release train: the production watch failed" --body "$body"; fi
+  drill:
+    if: github.event.schedule == '17 3 * * 1' || inputs.drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # (it runs staging's whole gate while staging is on the older version: it must not be cut off there)
+    environment: staging
+    permissions:
+      contents: read
+      deployments: write
+      issues: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: staging, fetch-depth: 0 }
+      - name: submodules (a read-only deploy key or a token, for a private one)
+        env:
+          SUBMODULE_SSH_KEY: ${{ secrets.SUBMODULE_SSH_KEY }}
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+        run: |
+          [ -f .gitmodules ] || exit 0
+          if [ -n "$SUBMODULE_SSH_KEY" ]; then
+            mkdir -p ~/.ssh && (umask 077 && printf '%s\n' "$SUBMODULE_SSH_KEY" > ~/.ssh/submodule)
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/submodule -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            git config --global url."git@github.com:".insteadOf "https://github.com/"
+          elif [ -n "$SUBMODULE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+          git submodule update --init --recursive
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          [ -z "$SUBMODULE_TOKEN" ] || git config --global --unset-all url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf || true
+          rm -f ~/.ssh/submodule
+      # A repo's own setup action stands in for Node 22 + npm (vibestack's: Node 26, pnpm, Dafny 4.11, Chromium).
+      - if: hashFiles('.github/actions/setup/action.yml') != ''
+        uses: ./.github/actions/setup
+      - if: hashFiles('.github/actions/setup/action.yml') == ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile; elif [ -f pnpm-lock.yaml ] && [ ! -d node_modules ]; then corepack enable && pnpm install --frozen-lockfile; fi
+      - name: the agent that plays the simulated people (only when the manifest has sims)
+        run: |
+          if node -e 'process.exit(require("./.deploy/manifest.json").sims ? 0 : 1)'; then npm install -g @anthropic-ai/claude-code; fi
+      - name: what the gates need
+        run: printf '%s\n' "$GATE_ENV" >> "$GITHUB_ENV"
+        env:
+          GATE_ENV: ${{ secrets.GATE_ENV }}
+      - name: roll staging back, gate it, come forward again
+        run: node .deploy/deploy.mjs drill staging | tee drill.log
+      - name: tell a person
+        if: failure()
+        continue-on-error: true
+        run: |
+          body=$(printf '```\n%s\n```' "$(tail -20 drill.log)")
+          gh issue create --title "release train: the rollback drill failed" --label release-train --body "$body" || gh issue create --title "release train: the rollback drill failed" --body "$body"
