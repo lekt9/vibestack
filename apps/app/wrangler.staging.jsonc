@@ -1,0 +1,15 @@
+// The Worker of apps/app in staging; deployed by the release train (.deploy/manifest.json), never by hand.
+// The three configs differ only in name: wrangler.jsonc is production, and a branch's preview is a copy of staging's.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vibestack-app-staging",
+  "main": "dist/worker/worker.js",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "build": { "command": "pnpm -s build", "watch_dir": ["src", "../../vibestack/cloudflare"] },
+  "assets": { "directory": "dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "durable_objects": { "bindings": [{ "name": "GREETERS", "class_name": "Greeters" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Greeters"] }],
+  "workers_dev": true,
+  "observability": { "enabled": true }
+}

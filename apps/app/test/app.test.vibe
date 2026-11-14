@@ -1,8 +1,10 @@
-// The shell of src/greeter.vibe across a reload: what the conformance driver (test/drivers/app.ts) cannot see,
-// which is a greeter started again from its store, and a store holding what is not one.
-import { assert, layer } from "@effect/vitest"
+// The shell of src/greeter.vibe across a reload: what the conformance driver (test/drivers/app.ts) cannot see, which is
+// a greeter started again from its store, a store holding what is not one, and the page's `remote` over the Worker.
+import { assert, it, layer } from "@effect/vitest"
 import * as KeyValueStore from "effect/persistence/KeyValueStore"
-import { Greetings, load, stored } from "../src/greeter.vibe"
+import { FetchHttpClient } from "effect/http"
+import { stateDir, worker } from "vibestack/testing/workers"
+import { Greetings, load, remote, stored } from "../src/greeter.vibe"
 
 /** The greeter a page opened now would show. */
 effect function reopened() { return Option.getOrUndefined(try Stream.runHead(Context.get(try Layer.build(stored), Greetings).changes)) }
@@ -26,4 +28,37 @@ layer(KeyValueStore.layerMemory)((it) => {
     const negative = try reopened()
     try Effect.try(() => assert.deepStrictEqual([again, invalid, negative], [{ name: "Grace", count: 2 }, { name: "", count: 0 }, { name: "", count: 0 }]))
   })
+})
+
+/** The Worker of this package, under `wrangler dev` over the storage in `persist`, or the deployed one at DEPLOY_URL. */
+function running(persist: string) {
+  return acquireRelease(tryPromise(() => worker(new URL("..", import.meta.url), { persist })), (w) => promise(() => w[Symbol.asyncDispose]()))
+}
+
+/** The greeter `key` as a page served by `url` shows it, and what it says to each input. */
+effect function page(url: string, key: string, inputs: unknown[]) {
+  const greetings = Context.get(try Layer.build(Layer.provide(remote(url, key), FetchHttpClient.layer)), Greetings)
+  const said: unknown[] = []
+  for (const input of inputs) said.push(greetings.receive(input) catch (error) => error._tag)
+  return { shown: Option.getOrUndefined(try Stream.runHead(greetings.changes)), said }
+}
+
+// spec/app/index.md, "Story: Say hello"
+// Through the Worker: the page's `remote`, the HTTP API, the Durable Object and its storage, across a restart.
+it.live("Say hello on the Worker, then start it again", () => effect {
+  const persist = try Effect.try(() => stateDir())
+  const key = `journey-${try Clock.currentTimeMillis}-${try Random.nextInt}`
+  const first = try scoped(effect {
+    const { url } = try running(persist)
+    // spec/app/index.md, "Only a name that is not empty can be greeted"
+    return try page(url, key, [{ type: "greet", name: "Ada" }, { type: "greet", name: "" }, { type: "greet" }, { type: "greet", name: "Grace" }])
+  })
+  const again = try scoped(effect {
+    const { url } = try running(persist)
+    return try page(url, key, [])
+  })
+  try Effect.try(() => assert.deepStrictEqual([first, again], [
+    { shown: { name: "Grace", count: 2 }, said: [{ name: "Ada", count: 1 }, "Rejected", "NotAnEvent", { name: "Grace", count: 2 }] },
+    { shown: { name: "Grace", count: 2 }, said: [] }
+  ]))
 })

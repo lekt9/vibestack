@@ -26,7 +26,8 @@ function fill() {
 
 // spec/app/index.md, "Story: Say hello"
 // Greeting disables the button that was clicked, and a browser then drops its focus: the page hands it to the name,
-// so the next one is typed at once. The greeter is in the browser's own localStorage, at its quota in the end.
+// so the next one is typed at once. The page here runs `stored` over the browser's own localStorage, filled to its quota in the
+// end, to see what it shows when a store refuses a greeter; on the Worker, `remote` answers a refusal as the same NotSaved.
 it("Say hello, one name after another, until the store is full", async () => {
   await act(() => Promise.resolve(root.render(<App runtime={runtime} />)));
   const name = page.getByRole("textbox", { name: "Name" }), greet = page.getByRole("button", { name: "Greet" });

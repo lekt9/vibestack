@@ -1,17 +1,35 @@
-// SPEC.md, "Conformance": spec/app/index.md against the shell of src/greeter.vibe, observed as what its store holds.
-import { Effect, Layer } from "effect";
-import * as KeyValueStore from "effect/persistence/KeyValueStore";
-import { effectDriver } from "vibestack/testing";
-import type { Options } from "../../gen/app.conformance.ts";
-import type { Event, Greeter } from "../../gen/app.ts";
-import { Greetings, load, stored } from "../../src/greeter.vibe";
+// SPEC.md, "Conformance": spec/app/index.md against the Worker of src/worker.vibe, through its HTTP API, the Durable
+// Objects and their storage: under `wrangler dev`, or the deployed Worker at DEPLOY_URL when the release train gates a
+// deploy (.deploy/manifest.json), where the network allows only a few walks.
+import { worker } from "vibestack/testing/workers";
+import type { Driver, Options } from "../../gen/app.conformance.ts";
+import type { Greeter } from "../../gen/app.ts";
 
-const refused = () => Effect.succeed("refused" as const);
-/** What the shell did with `input`: a refusal by the rules or the decoder is "refused", any other failure stays one. */
-const receive = (_key: string, input: unknown) =>
-  Greetings.use((g) => g.receive(input)).pipe(Effect.as("accepted" as const), Effect.catchTags({ Rejected: refused, NotAnEvent: refused }));
+const running = await worker(new URL("../..", import.meta.url));
+/** Each reset is a fresh set of greeters: keys no earlier run used. */
+const run = `conformance-${Date.now()}`;
+let fresh = 0;
+const at = (key: string) => `${running.url}/api/app/${run}-${fresh}-${key}`;
 
-export const driver = effectDriver<Event, Greeter, Greetings | KeyValueStore.KeyValueStore, never>(Layer.provideMerge(stored, KeyValueStore.layerMemory), { dispatch: receive, receive, observe: () => load() });
+/** What the Worker did with `body`: 400 and 409 are its refusals (vibestack/cloudflare, `machineApi`); anything else but 200 is a failure. */
+async function send(key: string, body: string | undefined) {
+  const answer = await fetch(at(key), { method: "POST", headers: { "content-type": "application/json" }, body });
+  if (answer.status === 200) return "accepted" as const;
+  if (answer.status === 400 || answer.status === 409) return "refused" as const;
+  throw new Error(`POST ${at(key)}: ${answer.status} ${await answer.text()}`);
+}
 
-/** One greeter, so one key. */
-export const options: Options = { keys: ["greeter"] };
+export const driver: Driver & AsyncDisposable = {
+  reset: () => { fresh++; },
+  dispatch: (key, event) => send(key, JSON.stringify(event)),
+  receive: (key, raw) => send(key, JSON.stringify(raw)),
+  async observe(key) {
+    const answer = await fetch(at(key));
+    if (!answer.ok) throw new Error(`GET ${at(key)}: ${answer.status} ${await answer.text()}`);
+    return await answer.json() as Greeter;
+  },
+  [Symbol.asyncDispose]: () => running[Symbol.asyncDispose](),
+};
+
+/** One greeter per key; two keys, so that one leaking into another shows. */
+export const options: Options = { keys: ["ada", "grace"], ...running.deployed ? { walks: 20 } : {} };

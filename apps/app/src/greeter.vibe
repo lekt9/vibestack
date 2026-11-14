@@ -1,12 +1,13 @@
 // spec/app/index.md, "Story: Say hello"
-// The shell: the greeter of spec/app/index.md, kept in a KeyValueStore, which main.tsx makes the browser's localStorage.
+// The shell: the greeter of spec/app/index.md, kept in a KeyValueStore by `stored`, which worker.vibe runs in a Durable
+// Object over its storage; `remote` is the same service in the page, over the Worker's HTTP API.
 import * as KeyValueStore from "effect/persistence/KeyValueStore"
-import { type Greeter, type NotAnEvent, type Rejected, apply, decodeEvent, decodeState, initial, parseState } from "../gen/app.effect.vibe"
+import { type Greeter, NotAnEvent, Rejected, apply, decodeEvent, decodeState, initial, parseState } from "../gen/app.effect.vibe"
 import { Saved } from "./greeter.schema.ts"
 
 const KEY = "greeter"
 
-/** The store did not take the greeter, which stays as it was. */
+/** The store did not take the greeter, or could not be reached to; it stays as it was. */
 export error NotSaved { cause: unknown }
 
 effect function saved() { return KeyValueStore.toSchemaStore(try KeyValueStore.KeyValueStore, Saved) }
@@ -38,3 +39,28 @@ export const stored = Layer.effect(Greetings, effect {
     })
   }
 })
+
+/**
+ * `Greetings` of the greeter `key` that the Worker at `base` holds (worker.vibe; vibestack/cloudflare, `machineApi`).
+ * The Worker decides; this only says what it answered, one input at a time, and shows a greeter only once it is stored.
+ */
+export function remote(base: string, key: string) {
+  return Layer.effect(Greetings, effect {
+    const client = HttpClient.mapRequest(try HttpClient.HttpClient, HttpClientRequest.prependUrl(base))
+    const at = `/api/app/${encodeURIComponent(key)}`
+    const unreached = (cause: unknown) => new NotSaved({ cause })
+    const held = try SubscriptionRef.make(try mapError(effect { return try decodeState(try (try client.get(at)).json) }, unreached))
+    return {
+      changes: Stream.map(SubscriptionRef.changes(held), (state) => parseState(state)!),
+      receive: (input) => SubscriptionRef.modifyEffect(held, effect (current) => {
+        const answer = try mapError(client.execute(try mapError(HttpClientRequest.bodyJson(HttpClientRequest.post(at), input), unreached)), unreached)
+        const said = try mapError(answer.json, unreached)
+        if (answer.status === 400) throw new NotAnEvent({ input })
+        if (answer.status === 409) throw new Rejected({ event: try decodeEvent(input), state: current })
+        if (answer.status !== 200) throw new NotSaved({ cause: said })
+        const next = try mapError(decodeState(said), unreached)
+        return [next, parseState(next)!] as const
+      })
+    }
+  })
+}

@@ -1,0 +1,12 @@
+// spec/app/index.md, "Story: Say hello"
+// The Worker (wrangler.jsonc): each greeter is a Durable Object holding `stored` of greeter.vibe over its own storage,
+// reached at /api/app/<key>; the page is the Vite build in dist/client, served before the Worker runs.
+import { machineApi, machineObject, worker } from "vibestack/cloudflare"
+import { Greetings, stored } from "./greeter.vibe"
+
+const api = machineApi("app", Greetings.use((g) => map(Stream.runHead(g.changes), Option.getOrThrow)), (input) => Greetings.use((g) => g.receive(input)))
+
+/** One greeter per key, bound as GREETERS. */
+export class Greeters extends machineObject(Layer.provideMerge(api, stored)) {}
+
+export default worker({ app: "GREETERS" })

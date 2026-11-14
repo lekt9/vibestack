@@ -1,11 +1,12 @@
 import { Layer, ManagedRuntime } from "effect";
-import * as KeyValueStore from "effect/persistence/KeyValueStore";
+import { FetchHttpClient } from "effect/http";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
-import { stored } from "./greeter.vibe";
+import { remote } from "./greeter.vibe";
 import "./main.css";
 
-const runtime = ManagedRuntime.make(Layer.provide(stored, KeyValueStore.layerStorage(() => localStorage)));
+// The page's greeter is the one the Worker that served it holds under the key "app" (worker.vibe).
+const runtime = ManagedRuntime.make(Layer.provide(remote(location.origin, "app"), FetchHttpClient.layer));
 
 createRoot(document.getElementById("root")!).render(<StrictMode><App runtime={runtime} /></StrictMode>);
