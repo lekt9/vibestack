@@ -85,6 +85,8 @@ would call true or false.
 | Interface | React with Vite, Tailwind CSS v4, shadcn/ui on Radix, tokens from `packages/design-system`, components in `packages/ui` with generated stories | `types`, ESLint and Stylelint rules for tokens, Storybook and browser tests |
 | Tests | Whole journeys in Vitest with `@effect/vitest` and Playwright, citing the rule each step serves; conformance runs of the real app against the spec | `tests`, `traces` |
 | Workspace | Node 26, pnpm workspaces, Turborepo; ESLint boundaries, Knip and Madge | `pnpm verify`, CI on every push |
+| Runtime | Cloudflare Workers: a Durable Object per machine, D1 and KV stores, the page as static assets, from `vibestack/cloudflare` | `traces` and journeys on the Worker under `wrangler dev`, then again on each deploy |
+| Delivery | The cf-release-train in `.deploy/`: a preview per branch, staging, preprod and production; `pnpm check` and `pnpm verify` before a deploy, conformance and journeys on the deployed Worker after it with rollback, a simulated person per story (`spec train`), a 6-hour soak before production | `node .deploy/deploy.mjs coverage` and `checks`; [shell skill, "On Cloudflare Workers"](.claude/skills/shell/SKILL.md#on-cloudflare-workers) |
 
 ```mermaid
 flowchart LR
@@ -286,7 +288,11 @@ current one. Installed as a package, use `pnpm exec spec <command> [<dir>]`.
 | `node vibestack/spec.ts watch [<dir>]` | Rechecks when a spec, source file or test changes |
 | `pnpm accept [<dir>]` | The user's sign-off: checks afresh and records what `review` lists, [all or nothing](SPEC.md#review) |
 | `pnpm accept unproved` | Records the listed obligations as simulated only. The user's decision |
-| `pnpm new [<path>]` | Fills an empty root index or creates a child [starter spec](SPEC.md#writing-a-spec) |
+| `pnpm new [<path>]` | Fills an empty root index or creates a child [starter spec](SPEC.md#writing-a-spec), and with `.deploy/manifest.json` writes a simulated person for its story |
+| `node vibestack/spec.ts train [--check]` | Writes a release-train scenario in `.deploy/sims/` for every story of each surface's spec; `--check` only says whether they are up to date (`TRAIN_OK`) |
+| `node vibestack/spec.ts observe <module> <url> [--run <id>]` | Reads a deployed Worker: its page answers and its machine holds a state the spec allows (`OBSERVED`); with `--run`, false on the first read and true once the state has changed (`OBSERVED_CHANGE`) |
+| `pnpm -C apps/app dev` | The app's Worker and page under `wrangler dev` |
+| `node .deploy/deploy.mjs coverage`, `checks`, `staging` | The release train: every surface tested three ways, the checks before a deploy, a gated deploy with rollback ([cf-release-train](.deploy/manifest.json)) |
 | `node vibestack/spec.ts init [<dir>]` | Sets up an existing project ([above](#using-it-from-another-package)) |
 | `node vibestack/spec.ts migrate [<dir>]` | Consolidates old review ledgers into `spec/lock.json`, keeping their approvals |
 | `pnpm demo` | Runs the order example's scripted checkout session |

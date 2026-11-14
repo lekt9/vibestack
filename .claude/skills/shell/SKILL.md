@@ -101,6 +101,50 @@ Style with Tailwind utilities on the project's tokens, compose shadcn/ui
 components before writing one, and follow the
 [design skill](../design/SKILL.md).
 
+## On Cloudflare Workers
+
+An application runs as a Worker (workerd, `nodejs_compat`), deployed only by
+the release train (`.deploy/manifest.json`). The platform is
+`vibestack/cloudflare` (`vibestack/cloudflare/workers.vibe`); the shell's own
+services do not change, so `gen/`'s machine and the spec stay the one model.
+`apps/app` is the worked example.
+
+| It exports | Which is |
+|---|---|
+| `durableStore(storage)` | a `KeyValueStore` in a Durable Object's own storage: where a machine's state lives |
+| `d1Store(db)`, `kvStore(namespace)` | a `KeyValueStore` in D1 (table `kv`) or KV, for state Workers share rather than a machine's; KV is eventually consistent |
+| `machineApi(name, current, receive)` | the HTTP API of one machine at `/api/<name>/:key`: GET its state; POST one untrusted input as JSON, 200 with the new state, 400 for `NotAnEvent`, 409 for `Rejected` (with the state), 503 for anything else, which changes nothing |
+| `machineObject(routes)` | a Durable Object class serving `routes` over `durableStore` of its own storage, built once per object: one machine per key, applying one event at a time |
+| `worker({ <name>: "<BINDING>" })` | the Worker's `fetch`: `/api/<name>/<key>` to that key's Durable Object; the Vite build in `dist/client` is served before the Worker runs |
+
+- **A package's Worker** is `src/worker.vibe`: `export class X extends
+  machineObject(Layer.provideMerge(machineApi("<module>", …), stored))` and
+  `export default worker({ <module>: "X_BINDING" })`. The page reaches it
+  with a layer of the same service over `HttpClient` (`remote` in
+  `apps/app/src/greeter.vibe`), on the key named after the module.
+- **Build and run.** `pnpm build` is `vite build` (the page, to
+  `dist/client`) and `vite build --ssr src/worker.vibe` (the Worker, whole,
+  to `dist/worker`). `pnpm dev` is `wrangler dev`, which builds first
+  (`build` in `wrangler.jsonc`) and rebuilds on a change. There are three
+  configs, `wrangler.jsonc` (production), `wrangler.staging.jsonc` and
+  `wrangler.preprod.jsonc`, the same but for `name`; a branch's preview is a
+  copy of staging's with Durable Objects of its own.
+- **Tests and drivers reach the Worker** through `worker(dir)` from
+  `vibestack/testing/workers`: `wrangler dev` over a fresh storage directory
+  (or `persist` to start it again over the same one), or the deployed Worker
+  at `DEPLOY_URL` when a gate runs them. The conformance driver sends each
+  reset to keys no earlier run used, so it needs no reset endpoint.
+- **The release train.** `.deploy/manifest.json` lists the checks (`pnpm
+  check`, `pnpm verify`, `spec train --check`, `sim.mjs validate`), the gates
+  on the deployed Worker (conformance and journeys with `DEPLOY_URL`, and the
+  simulated people on a preview), and a surface per Worker with the spec it
+  serves (`"spec"`, `"worker"`). `spec train` writes a simulated person per
+  story of that spec to `.deploy/sims/`, judged by `spec observe <module>
+  <url> --run <id>` (false before the person acts, true once the deployed
+  state has changed into one the spec allows); `pnpm new` runs it. The
+  scripts in `.deploy/*.mjs` are the cf-release-train skill's, copied whole:
+  never edit them here.
+
 ## Building, running and testing
 
 | | Command | Does |
